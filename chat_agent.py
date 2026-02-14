@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStream
 # =============================
 # LOCAL MODEL PATH (SHARED)
 # =============================
-MODEL_PATH = "V:/Document/Vella-Modes/models/TinyLlama-1.1B-Chat-v1.0"
+MODEL_PATH = "V:/Document/Vella-Modes/models/models--distilgpt2/snapshots/2290a62682d06624634c1f46a6ad5be0f47f38aa"
 
 # =============================
 # LOAD ONCE (OFFLINE ONLY)
