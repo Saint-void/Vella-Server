@@ -1,26 +1,25 @@
 import os
 from huggingface_hub import snapshot_download
 
-# 1. Define the model repository and your local target directory
-MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-TARGET_DIR = "V:/Document/Vella-Modes/models/TinyLlama-1.1B-Chat-v1.0"
+# 1. The exact folder path you want
+local_path = r"V:/Document/Vella-Modes/models/models--distil-whisper--distil-large-v3/snapshots/latest"
 
-# 2. Create the directory if it doesn't exist
-os.makedirs(TARGET_DIR, exist_ok=True)
+# 2. The Repo ID for the CTranslate2 version of Distil-Large-V3
+# (This is the specific format faster-whisper needs)
+repo_id = "Systran/faster-distil-whisper-small-v3"
 
-print(f"⏳ Downloading {MODEL_ID} to {TARGET_DIR}...")
-print("This may take a few minutes depending on your internet speed.")
+print(f"🚀 Downloading {repo_id}...")
+print(f"📂 Destination: {local_path}")
 
-# 3. Download the model (Snapshot ensures we get config, tokenizer, and safetensors)
 try:
     snapshot_download(
-        repo_id=MODEL_ID,
-        local_dir=TARGET_DIR,
-        local_dir_use_symlinks=False,  # Important for Windows to ensure actual files are downloaded
-        resume_download=True
+        repo_id=repo_id,
+        local_dir=local_path,
+        local_dir_use_symlinks=False, # Downloads actual files, not links
+        allow_patterns=["config.json", "model.bin", "vocabulary.json"] # Get only essential files
     )
     print("\n✅ Download Complete!")
-    print(f"Model saved to: {TARGET_DIR}")
+    print("You can now run your router.")
 
 except Exception as e:
-    print(f"\n❌ Error downloading model: {e}")
+    print(f"\n❌ Error: {e}")
