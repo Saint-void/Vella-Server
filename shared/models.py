@@ -5,6 +5,7 @@ from faster_whisper import WhisperModel
 
 # 1. LOAD TINYLLAMA (Shared by Vella & Volco)
 LLM_PATH = r"V:\Document\Vella-Modes\models\TinyLlama-1.1B-Chat-v1.0"
+
 print(f"🧠 Loading Global LLM from: {LLM_PATH}...")
 tokenizer = AutoTokenizer.from_pretrained(LLM_PATH, local_files_only=True)
 model = AutoModelForCausalLM.from_pretrained(LLM_PATH, local_files_only=True)
