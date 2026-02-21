@@ -1,3 +1,4 @@
+# backend/main.py
 import os
 # Force offline mode for HuggingFace
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -7,18 +8,19 @@ import time
 import tempfile
 import subprocess
 import uuid
-import re 
 from fastapi import FastAPI, UploadFile, File, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from faster_whisper import WhisperModel
 from starlette.concurrency import iterate_in_threadpool
 
-# --- CUSTOM IMPORTS ---
-from chat_agent import generate, stream_generate 
+# --- NEW FOLDER IMPORTS ---
+from shared.models import whisper_model         # Loaded once from shared!
+from vella.agent import stream_generate         # Vella's specific logic
+from volco.router import router as volco_router # Volco's specific router
+
+# --- EXISTING IMPORTS ---
 from auth import router as auth_router
-from volco_router import router as volco_router
 from vector_store import setup_schema, search_memory, add_memory
 from db import init_db, save_message, get_user_sessions, get_chat_history
 
@@ -27,14 +29,6 @@ from db import init_db, save_message, get_user_sessions, get_chat_history
 # =============================
 PIPER_EXE = r"V:/Document/Vella-Modes/models/piper/piper.exe"
 VOICE_MODEL = r"V:/Document/Vella-Modes/models/tts-piper/en_US-lessac-medium.onnx"
-
-# Load Whisper
-print("Loading Whisper...")
-whisper_model = WhisperModel(
-    "V:/Document/Vella-Modes/models/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120",
-    device="cpu",
-    compute_type="int8"
-)
 
 app = FastAPI(title="Vella Unified Backend")
 
@@ -54,7 +48,6 @@ def startup_event():
     setup_schema()
     init_db()
     
-    # --- DEBUG: PRINT ALL ROUTES ---
     print("\n🗺️  Active Routes:")
     for route in app.routes:
         print(f"   - {route.path}")
@@ -63,33 +56,13 @@ def startup_event():
 # =============================
 # HELPERS (AUDIO GENERATION)
 # =============================
-
 def run_piper_tts(text: str, output_file: str):
-    """Generates a WAV file (For Web UI)"""
     if not os.path.exists(PIPER_EXE): raise FileNotFoundError("Piper not found")
-    
     command = [PIPER_EXE, "--model", VOICE_MODEL, "--output_file", output_file]
-    
     process = subprocess.run(command, input=text, text=True, capture_output=True, encoding='utf-8')
     if process.returncode != 0:
         print(f"Piper Error: {process.stderr}")
         raise Exception("Piper synthesis failed.")
-
-def generate_piper_pcm(text: str) -> bytes:
-    """Generates RAW AUDIO BYTES (For Volco Streaming)"""
-    if not text.strip(): return b""
-    
-    command = [PIPER_EXE, "--model", VOICE_MODEL, "--output-raw"]
-    
-    try:
-        process = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        stdout_data, stderr_data = process.communicate(input=text.encode('utf-8'))
-        return stdout_data
-    except Exception as e:
-        print(f"Piper Stream Error: {e}")
-        return b""
 
 def remove_file(path: str):
     try:
@@ -97,12 +70,11 @@ def remove_file(path: str):
     except: pass
 
 # =============================
-# 1. WEB CHAT ENDPOINTS (RESTORED)
+# 1. WEB CHAT ENDPOINTS 
 # =============================
-
 class ChatRequest(BaseModel):
     prompt: str
-    max_new_tokens: int = 128
+    max_new_tokens: int = 512 # Changed to match Vella's new defaults
 
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest, request: Request):
@@ -110,18 +82,15 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     session_id = request.headers.get("x-session-id")
     if not session_id or session_id == "null": session_id = str(uuid.uuid4())
 
-    # Save User Msg
     save_message(session_id, user_id, "user", req.prompt)
 
     async def response_generator():
         yield "" 
         full_response = ""
-        # Stream text token by token
         async for token in iterate_in_threadpool(stream_generate(req.prompt, max_new_tokens=req.max_new_tokens)):
             full_response += token
             yield token 
         
-        # Save Model Msg
         if full_response.strip():
             save_message(session_id, user_id, "model", full_response)
             add_memory(req.prompt, user_id)
@@ -138,9 +107,8 @@ def read_chat_history(session_id: str):
     return get_chat_history(session_id)
 
 # =============================
-# 2. WEB AUDIO ENDPOINTS (RESTORED)
+# 2. WEB AUDIO ENDPOINTS 
 # =============================
-
 @app.post("/stt")
 async def speech_to_text(audio: UploadFile = File(...)):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:

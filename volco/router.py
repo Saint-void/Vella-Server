@@ -1,3 +1,4 @@
+# backend/volco/router.py
 import os
 import re
 import subprocess
@@ -7,43 +8,19 @@ import wave
 import tempfile
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Dict
-from faster_whisper import WhisperModel
 
-# 🆕 IMPORT THE ACTION ENGINE
+# 🆕 IMPORT THE SHARED MODELS & VOLCO'S LOGIC
+from shared.models import whisper_model
+from volco.agent import stream_generate
 from action_engine import ActionEngine 
-action_engine = ActionEngine()
 
-# --- IMPORTS ---
-try:
-    from chat_agent import stream_generate
-except ImportError:
-    # ⚡ CHANGED: Added is_voice=False to match the new signature
-    def stream_generate(prompt: str, max_new_tokens: int = 128, is_voice: bool = False): 
-        yield f"Echo: {prompt}"
+action_engine = ActionEngine()
 
 # ⚙️ CONFIGURATION
 PIPER_EXE = r"V:/Document/Vella-Modes/models/piper/piper.exe"
 VOICE_MODEL = r"V:/Document/Vella-Modes/models/tts-piper/en_US-lessac-medium.onnx"
-MODEL_PRIMARY_PATH = r"V:/Document/Vella-Modes/models/models--distil-whisper--distil-large-v3/snapshots/latest"
-MODEL_FALLBACK_PATH = r"V:/Document/Vella-Modes/models/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120"
 
 router = APIRouter()
-
-# 🧠 MODEL LOADING 
-whisper_model = None
-print(f"\n🎧 Initializing Whisper AI...")
-try:
-    print(f"   👉 Attempting to load Primary: Distil-Large-V3...")
-    whisper_model = WhisperModel(MODEL_PRIMARY_PATH, device="cuda", compute_type="float16")
-    print("   ✅ SUCCESS: Primary Model Loaded (GPU/Float16)!")
-except Exception as e_primary:
-    print(f"   ⚠️ Primary Load Failed: {e_primary}")
-    try:
-        print(f"   👉 Attempting to load Fallback: Faster-Whisper-Small...")
-        whisper_model = WhisperModel(MODEL_FALLBACK_PATH, device="cpu", compute_type="int8")
-        print("   ✅ SUCCESS: Fallback Model Loaded (CPU/Int8)!")
-    except Exception:
-        whisper_model = None
 
 # 📡 CONNECTION MANAGER
 class ConnectionManager:
@@ -82,8 +59,8 @@ async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: s
     try:
         await manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
         
-        # ⚡ CHANGED: Passed is_voice=True to the generator
-        for token in stream_generate(prompt, is_voice=True):
+        # ⚡ USING VOLCO'S STREAM GENERATOR NOW
+        for token in stream_generate(prompt):
             buffer += token
             await manager.broadcast_to_app(user_id, {"role": "ai_token", "content": token})
             parts = sentence_endings.split(buffer)
@@ -100,7 +77,7 @@ async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: s
         return True 
     except: return False
 
-# ⚡ NEW: SIMPLE AUDIO RESPONDER
+# ⚡ SIMPLE AUDIO RESPONDER
 async def speak_simple_message(text: str, websocket: WebSocket, user_id: str):
     await manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
     await manager.broadcast_to_app(user_id, {"role": "ai_token", "content": text})
@@ -152,14 +129,12 @@ async def websocket_endpoint(websocket: WebSocket, client_type: str = Query(...)
                     if text:
                         await manager.broadcast_to_app(user_id, {"role": "user", "content": text})
 
-                        # ⚡ 1. CHECK FOR COMMANDS FIRST
                         is_command, response_text = action_engine.execute(text)
 
                         if is_command:
                             print(f"🤖 Action Executed: {response_text}")
                             await speak_simple_message(response_text, websocket, user_id)
                         else:
-                            # ⚡ 2. IF NOT A COMMAND, SEND TO LLM
                             success = await stream_audio_response_ws(text, websocket, user_id)
                             if not success: break 
 

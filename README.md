@@ -1,17 +1,14 @@
-Here is the updated **README.md** for the **Vella Server (Backend)**.
-
-I have updated it to **v4.0.0** to reflect the major database integration, added the PostgreSQL setup instructions, and updated the project structure to include the new `db.py` and `auth.py` files.
 
 ---
 
-# 🧠 Vella AI Server (Backend)
+# 🧠 Vella & Volco AI Server (Backend)
 
-> **Local Intelligence Engine for Vella Chat.**
-> *v4.0.0 | FastAPI | PostgreSQL | Piper TTS | Faster-Whisper*
+> **Local Intelligence Engine for Vella Chat & Volco Voice.**
+> *v6.0.0 | FastAPI | PostgreSQL | Piper TTS | Faster-Whisper | WebSockets*
 
-The Vella Server is the local backend that powers the Vella Chat Interface. It handles LLM inference, voice processing (STT/TTS), and now features **Persistent Long-Term Memory** via PostgreSQL.
+The Vella Server is the local backend that powers both the Vella Web Interface and the Volco Hardware/Voice Assistant. It handles LLM inference, voice processing (STT/TTS), action execution, and features **Persistent Long-Term Memory** via PostgreSQL and Weaviate.
 
-**New in v4.0.0:** Complete PostgreSQL integration for user authentication and chat history persistence.
+**New in v6.0.0:** A complete architectural rewrite introducing a **Dual-Persona Modular System**. Vella (long-form text) and Volco (real-time voice) now run on separate logic streams while sharing a single LLM loaded in memory to prevent VRAM exhaustion. Added WebSocket support for instant audio streaming.
 
 ---
 
@@ -19,14 +16,15 @@ The Vella Server is the local backend that powers the Vella Chat Interface. It h
 
 * **API Framework:** `FastAPI` (Python 3.10+) running on `Uvicorn`.
 * **Database:** `PostgreSQL` — *Stores Users, Sessions, and Message Logs.*
-* **LLM Engine:** Custom `chat_agent.py` using `TextIteratorStreamer` for real-time token generation.
+* **LLM Engine:** `TinyLlama 1.1B` running via `Transformers` with `TextIteratorStreamer`.
 * **Voice Engine:**
-* **STT:** `Faster-Whisper` (Local, CPU/GPU optimized).
-* **TTS:** `Piper TTS` (Zero-latency local synthesis).
+* **STT:** `Faster-Whisper` (Local, GPU/Float16 optimized with CPU/Int8 fallback).
+* **TTS:** `Piper TTS` (Zero-latency local raw PCM & WAV synthesis).
 
 
+* **Real-Time Comm:** `WebSockets` — For continuous two-way audio streaming (Volco).
+* **Action Engine:** Custom command parser for opening apps, playing music, and checking system time.
 * **Memory:** `Weaviate` — Vector database for semantic context retrieval.
-* **Tunneling:** `ngrok` — Securely exposes localhost to the Android frontend.
 
 ---
 
@@ -37,6 +35,7 @@ The Vella Server is the local backend that powers the Vella Chat Interface. It h
 * **Python 3.10+**
 * **PostgreSQL** installed and running locally.
 * **FFmpeg** installed and added to system PATH.
+* **Weaviate** running locally (Port 8080).
 
 ### 2. Database Configuration
 
@@ -45,6 +44,7 @@ Create a `.env` file in the `backend/` directory or ensure your `db.py` defaults
 ```env
 # Example .env configuration
 DATABASE_URL="postgresql://postgres:password@localhost:5432/vella"
+SECRET_KEY="supersecretkey"
 
 ```
 
@@ -53,15 +53,14 @@ DATABASE_URL="postgresql://postgres:password@localhost:5432/vella"
 ### 3. Installation
 
 ```bash
-cd backend
-
-# Create Virtual Environment (Optional but recommended)
+# Create Virtual Environment
 python -m venv venv
+
 # Windows: venv\Scripts\activate
 # Mac/Linux: source venv/bin/activate
 
 # Install Dependencies
-pip install fastapi uvicorn psycopg2-binary python-dotenv transformers torch faster-whisper
+pip install fastapi uvicorn psycopg2-binary python-dotenv transformers torch faster-whisper weaviate-client sentence-transformers
 
 ```
 
@@ -75,28 +74,32 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8001
 
 ```
 
-### 5. Open the Tunnel
-
-To allow the Android app to connect:
-
-```bash
-ngrok http 8001
-
-```
-
 ---
 
-## 📂 Project Structure
+## 📂 Project Structure (Modular Architecture)
 
 ```text
 VELLA-SERVER/
-├── main.py             # Entry point (FastAPI App, Routes, & Startup Logic)
-├── db.py               # Database Connection & Schema Initialization (Postgres)
-├── auth.py             # User Authentication (Register/Login Endpoints)
-├── chat_agent.py       # LLM Logic & Streaming Generator
-├── vector_store.py     # Weaviate Connection for Semantic Memory
-├── requirements.txt    # Python Dependencies
-└── .env                # (Optional) Environment Variables
+├── main.py                # Entry point (FastAPI App, Routes, & Startup Logic)
+├── db.py                  # Database Connection & Schema Initialization (Postgres)
+├── auth.py                # User Authentication (Register/Login Endpoints)
+├── action_engine.py       # Executes local system commands (Time, Apps, Browser)
+├── vector_store.py        # Weaviate Connection for Semantic Memory
+├── .env                   # Environment Variables
+│
+├── shared/                # 🧠 THE SHARED BRAIN
+│   ├── __init__.py
+│   └── models.py          # Loads TinyLlama & Whisper ONCE to save RAM
+│
+├── vella/                 # 🌌 VELLA'S LOGIC (Web/Text)
+│   ├── __init__.py
+│   ├── constants.py       # Vella's System Prompt & Persona Rules
+│   └── agent.py           # Long-form streaming logic
+│
+└── volco/                 # 🗣️ VOLCO'S LOGIC (Hardware/Voice)
+    ├── __init__.py
+    ├── agent.py           # Short-form, fast streaming logic
+    └── router.py          # WebSocket logic & audio buffer handling
 
 ```
 
@@ -109,27 +112,32 @@ VELLA-SERVER/
 * `POST /auth/register` — Create a new user account.
 * `POST /auth/login` — Authenticate and retrieve User ID.
 
-### **Chat & History**
+### **Vella (Chat & History)**
 
 * `POST /chat` — Stream LLM responses (Saves to DB automatically).
 * `GET /history/sessions?user_id={id}` — Retrieve list of past conversations.
 * `GET /history/{session_id}` — Retrieve full message history for a chat.
 
-### **Voice Features**
+### **Voice Features (REST)**
 
 * `POST /stt` — Transcribe audio file to text (Whisper).
 * `POST /tts` — Synthesize text to audio file (Piper).
+
+### **Volco (Real-Time Voice)**
+
+* `WS /volco_ws` — WebSocket endpoint for continuous audio streaming, transcription, and instant TTS playback. Supports `device` and `app` client types.
 
 ---
 
 ## 🛣️ Roadmap
 
 * [x] **PostgreSQL Integration:** Full persistence for chats and users.
-* [x] **Real-Time Streaming:** Text-to-speech pipeline and token streaming.
+* [x] **Modular Architecture:** Split logic into `vella`, `volco`, and `shared` to optimize VRAM.
+* [x] **Real-Time Audio Streaming:** WebSockets implemented for zero-latency voice interaction.
+* [x] **Action Engine:** Hardware-level command execution.
+* [ ] **Weaviate Integration:** Fully connect semantic search to the LLM context window.
 * [ ] **Secure Auth:** Upgrade simple ID auth to JWT (JSON Web Tokens).
-* [ ] **Long-Term Memory:** Connect Weaviate to recall specific user facts.
-* [ ] **File Analysis:** Add endpoint to parse PDFs and text files.
 
 ---
 
-**Developed by Vella AI Systems.** *Private, Local, Intelligent.*
+**Developed by Void Tech.** *Private, Local, Intelligent.*
