@@ -17,7 +17,8 @@ action_engine = ActionEngine()
 try:
     from chat_agent import stream_generate
 except ImportError:
-    def stream_generate(prompt: str, max_new_tokens: int = 128): 
+    # ⚡ CHANGED: Added is_voice=False to match the new signature
+    def stream_generate(prompt: str, max_new_tokens: int = 128, is_voice: bool = False): 
         yield f"Echo: {prompt}"
 
 # ⚙️ CONFIGURATION
@@ -28,7 +29,7 @@ MODEL_FALLBACK_PATH = r"V:/Document/Vella-Modes/models/models--Systran--faster-w
 
 router = APIRouter()
 
-# 🧠 MODEL LOADING (Same as before)
+# 🧠 MODEL LOADING 
 whisper_model = None
 print(f"\n🎧 Initializing Whisper AI...")
 try:
@@ -44,7 +45,7 @@ except Exception as e_primary:
     except Exception:
         whisper_model = None
 
-# 📡 CONNECTION MANAGER (Same as before)
+# 📡 CONNECTION MANAGER
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, Dict[str, WebSocket]] = {}
@@ -80,7 +81,9 @@ async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: s
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
     try:
         await manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
-        for token in stream_generate(prompt):
+        
+        # ⚡ CHANGED: Passed is_voice=True to the generator
+        for token in stream_generate(prompt, is_voice=True):
             buffer += token
             await manager.broadcast_to_app(user_id, {"role": "ai_token", "content": token})
             parts = sentence_endings.split(buffer)
@@ -97,7 +100,7 @@ async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: s
         return True 
     except: return False
 
-# ⚡ NEW: SIMPLE AUDIO RESPONDER (For short command replies)
+# ⚡ NEW: SIMPLE AUDIO RESPONDER
 async def speak_simple_message(text: str, websocket: WebSocket, user_id: str):
     await manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
     await manager.broadcast_to_app(user_id, {"role": "ai_token", "content": text})
@@ -153,7 +156,6 @@ async def websocket_endpoint(websocket: WebSocket, client_type: str = Query(...)
                         is_command, response_text = action_engine.execute(text)
 
                         if is_command:
-                            # If it was a command ("Play X"), just speak the result confirmation
                             print(f"🤖 Action Executed: {response_text}")
                             await speak_simple_message(response_text, websocket, user_id)
                         else:
