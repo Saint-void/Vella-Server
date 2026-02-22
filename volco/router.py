@@ -108,6 +108,12 @@ async def websocket_endpoint(websocket: WebSocket, client_type: str = Query(...)
                 if "bytes" in data:
                     audio_buffer.extend(data["bytes"])
 
+                # 🚀 FIXED: Added the CANCEL interceptor right here!
+                elif "text" in data and data["text"] == "CANCEL":
+                    print(f"🧹 Ignored noise detected. Flushing buffer for {user_id}.")
+                    audio_buffer.clear() # Empty the trash so it doesn't bleed into the next recording
+                    continue
+
                 elif "text" in data and data["text"] == "COMMIT":
                     text = ""
                     if len(audio_buffer) > 0:
@@ -120,9 +126,11 @@ async def websocket_endpoint(websocket: WebSocket, client_type: str = Query(...)
                             segments, _ = whisper_model.transcribe(temp_filename, beam_size=1, language="en", condition_on_previous_text=False)
                             text = " ".join([s.text for s in segments]).strip()
                         except Exception as e: print(f"Transcribe Error: {e}")
+                        
                         try: os.remove(temp_filename)
                         except: pass
-                        audio_buffer = bytearray() 
+                        
+                        audio_buffer.clear() # FIXED: Changed to .clear() which is slightly faster/safer than reassigning bytearray()
 
                     print(f"🗣️ {user_id}: {text}")
 
