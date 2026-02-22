@@ -108,10 +108,20 @@ async def websocket_endpoint(websocket: WebSocket, client_type: str = Query(...)
                 if "bytes" in data:
                     audio_buffer.extend(data["bytes"])
 
-                # 🚀 FIXED: Added the CANCEL interceptor right here!
+                # 🚀 FIXED: Added the CANCEL interceptor right here
                 elif "text" in data and data["text"] == "CANCEL":
                     print(f"🧹 Ignored noise detected. Flushing buffer for {user_id}.")
-                    audio_buffer.clear() # Empty the trash so it doesn't bleed into the next recording
+                    audio_buffer.clear() 
+                    continue
+
+                # 🚀 🆕 CATCH THE GREETING COMMAND
+                elif "text" in data and data["text"] == "GREETING":
+                    print(f"👋 Greeting requested by {user_id}")
+                    audio_buffer.clear() # Dump the buffer so we don't accidentally transcribe a breath
+                    
+                    # Generate the custom greeting audio using your Piper function!
+                    await speak_simple_message("Sup Sogolo, I'm listening.", websocket, user_id)
+                    await websocket.send_text("END_OF_RESPONSE")
                     continue
 
                 elif "text" in data and data["text"] == "COMMIT":
