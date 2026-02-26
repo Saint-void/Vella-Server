@@ -1,39 +1,37 @@
-# backend/volco/agent.py
 import torch
 from threading import Thread
 from transformers import TextIteratorStreamer
+
+# ⚡ IMPORT ALREADY LOADED MODELS FROM SHARED
 from shared.models import model, tokenizer
 
-VOLCO_SYSTEM_INSTRUCTION = "You are Volco, a helpful voice assistant. Reply very briefly and naturally."
-
-def format_chat_prompt(user_message: str):
-    messages = [
-        {"role": "system", "content": VOLCO_SYSTEM_INSTRUCTION},
-        {"role": "user", "content": user_message}
-    ]
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-def stream_generate(prompt: str, max_new_tokens: int = 40):
-    formatted_prompt = format_chat_prompt(prompt)
-    inputs = tokenizer(formatted_prompt, return_tensors="pt")
-
+def stream_generate(prompt: str):
+    """Yields words one by one, strictly formatted for short voice replies."""
+    
+    # TinyLlama Chat Format + Strict System Rule
+    system_prompt = "You are Volco, a voice assistant. Answer in exactly one short sentence."
+    final_prompt = f"<|system|>\n{system_prompt}</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n"
+    
+    inputs = tokenizer([final_prompt], return_tensors="pt")
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
     generation_kwargs = dict(
         **inputs,
         streamer=streamer,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=40,      # Strict limit for voice
         pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        do_sample=False, 
-        repetition_penalty=1.15
+        do_sample=True,
+        temperature=0.7,
+        top_k=50,
+        top_p=0.95,
+        repetition_penalty=1.2
     )
 
     thread = Thread(target=model.generate, kwargs=generation_kwargs)
     thread.start()
 
     for new_text in streamer:
-        # Force cut off at the first newline so Volco doesn't ramble
+        # Early cutoff: Stop if it tries to hallucinate a new line
         if "\n" in new_text:
             yield new_text.split("\n")[0]
             break

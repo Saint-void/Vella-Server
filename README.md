@@ -138,6 +138,6 @@ VELLA-SERVER/
 * [ ] **Weaviate Integration:** Fully connect semantic search to the LLM context window.
 * [ ] **Secure Auth:** Upgrade simple ID auth to JWT (JSON Web Tokens).
 
----
+
 
 **Developed by Void Tech.** *Private, Local, Intelligent.*

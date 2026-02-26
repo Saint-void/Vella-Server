@@ -17,12 +17,10 @@ from starlette.concurrency import iterate_in_threadpool
 # --- NEW FOLDER IMPORTS ---
 from shared.models import whisper_model         # Loaded once from shared!
 from vella.agent import stream_generate         # Vella's specific logic
-from volco.router import router as volco_router # Volco's specific router
-
-# --- EXISTING IMPORTS ---
 from auth import router as auth_router
 from vector_store import setup_schema, search_memory, add_memory
 from db import init_db, save_message, get_user_sessions, get_chat_history
+from volco.router import router as volco_router
 
 # =============================
 # CONFIGURATION
@@ -50,7 +48,7 @@ def startup_event():
     
     print("\n🗺️  Active Routes:")
     for route in app.routes:
-        print(f"   - {route.path}")
+        print(f"   - {route.path}")  # type: ignore
     print("---------------------\n")
 
 # =============================
