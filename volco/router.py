@@ -5,6 +5,8 @@ import asyncio
 import tempfile
 import subprocess
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from starlette.concurrency import iterate_in_threadpool
+import asyncio
 
 # ⚡ IMPORT ALREADY LOADED WHISPER FROM SHARED
 from shared.models import whisper_model
@@ -42,7 +44,10 @@ async def speak_simple_message(text: str, websocket: WebSocket, user_id: str):
     """Speaks a single, pre-calculated message (for commands)."""
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": text})
-    pcm = generate_piper_pcm(text)
+    
+    # ⚡ NEW: Offload Piper TTS generation to a background thread
+    pcm = await asyncio.to_thread(generate_piper_pcm, text)
+    
     if pcm: await websocket.send_bytes(pcm)
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
 
@@ -52,14 +57,11 @@ async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: s
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
     try:
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
-        
-        # ⚡ NEW: Start the terminal line for the AI's response
         print(f"🤖 Volco: ", end="", flush=True)
         
-        for token in stream_generate(prompt):
+        # ⚡ NEW: Iterate the LLM in a threadpool so it doesn't freeze the websocket!
+        async for token in iterate_in_threadpool(stream_generate(prompt)):
             buffer += token
-            
-            # ⚡ NEW: Print each token to the server console as it streams
             print(token, end="", flush=True)
             
             await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": token})
@@ -67,21 +69,20 @@ async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: s
             if len(parts) > 1:
                 sentence = parts[0]; buffer = parts[1]
                 if sentence.strip():
-                    pcm = generate_piper_pcm(sentence)
+                    # ⚡ NEW: Offload Piper TTS generation to a background thread
+                    pcm = await asyncio.to_thread(generate_piper_pcm, sentence)
                     if pcm: await websocket.send_bytes(pcm)
-                    await asyncio.sleep(0.01)
                     
         if buffer.strip():
-            pcm = generate_piper_pcm(buffer)
+            pcm = await asyncio.to_thread(generate_piper_pcm, buffer)
             if pcm: await websocket.send_bytes(pcm)
             
-        # ⚡ NEW: Add a final line break in the terminal when finished
         print()
-        
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
         return True 
     except Exception as e: 
-        print(f"\n❌ Stream Error: {e}")
+        # Added 'repr' so if it crashes again, we see the exact error type!
+        print(f"\n❌ Stream Error: {repr(e)}") 
         return False
 
 # ==========================================
