@@ -4,9 +4,10 @@ import wave
 import asyncio
 import tempfile
 import subprocess
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
-import asyncio
+from aiortc import RTCPeerConnection, RTCSessionDescription
 
 # ⚡ IMPORT ALREADY LOADED WHISPER FROM SHARED
 from shared.models import whisper_model
@@ -18,6 +19,10 @@ from volco.agent import stream_generate
 
 action_engine = ActionEngine()
 router = APIRouter()
+
+# ⚡ THE FIX: Memory Locks to prevent Python from Garbage Collecting our connections
+active_connections = set()
+active_channels = set() 
 
 # ==========================================
 # ⚙️ CONFIGURATION & PATHS
@@ -37,29 +42,36 @@ def generate_piper_pcm(text: str) -> bytes:
         return stdout_data
     except: return b""
 
+# ⚡ THE FIX: THE PACED CHUNKER
+async def send_pcm_in_chunks(channel, pcm_data):
+    """Slices massive audio files into 16KB chunks and PACES them over UDP."""
+    CHUNK_SIZE = 16384 # 16KB (about 0.5 seconds of audio)
+    for i in range(0, len(pcm_data), CHUNK_SIZE):
+        if channel.readyState == "open":
+            channel.send(pcm_data[i:i+CHUNK_SIZE])
+            # Pace the stream so we don't flood the network and crash the socket!
+            await asyncio.sleep(0.1) 
+
 # ==========================================
 # 🔄 STREAMING LOGIC
 # ==========================================
-async def speak_simple_message(text: str, websocket: WebSocket, user_id: str):
-    """Speaks a single, pre-calculated message (for commands)."""
+async def speak_simple_message(text: str, channel, user_id: str):
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": text})
     
-    # ⚡ NEW: Offload Piper TTS generation to a background thread
     pcm = await asyncio.to_thread(generate_piper_pcm, text)
-    
-    if pcm: await websocket.send_bytes(pcm)
+    if pcm: 
+        await send_pcm_in_chunks(channel, pcm) 
+        
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
 
-async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: str) -> bool:
-    """Streams LLM generation out to audio chunks and prints to terminal."""
+async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
     buffer = ""
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
     try:
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
         print(f"🤖 Volco: ", end="", flush=True)
         
-        # ⚡ NEW: Iterate the LLM in a threadpool so it doesn't freeze the websocket!
         async for token in iterate_in_threadpool(stream_generate(prompt)):
             buffer += token
             print(token, end="", flush=True)
@@ -69,92 +81,104 @@ async def stream_audio_response_ws(prompt: str, websocket: WebSocket, user_id: s
             if len(parts) > 1:
                 sentence = parts[0]; buffer = parts[1]
                 if sentence.strip():
-                    # ⚡ NEW: Offload Piper TTS generation to a background thread
                     pcm = await asyncio.to_thread(generate_piper_pcm, sentence)
-                    if pcm: await websocket.send_bytes(pcm)
+                    if pcm: await send_pcm_in_chunks(channel, pcm)
                     
         if buffer.strip():
             pcm = await asyncio.to_thread(generate_piper_pcm, buffer)
-            if pcm: await websocket.send_bytes(pcm)
+            if pcm: await send_pcm_in_chunks(channel, pcm)
             
         print()
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
         return True 
     except Exception as e: 
-        # Added 'repr' so if it crashes again, we see the exact error type!
         print(f"\n❌ Stream Error: {repr(e)}") 
         return False
 
 # ==========================================
-# 🔌 WEBSOCKET ENDPOINT
+# 🧠 THE AI BRAIN 
 # ==========================================
-@router.websocket("/volco_ws")
-async def websocket_endpoint(websocket: WebSocket, client_type: str = Query(...), user_id: str = Query(...)):
-    await volco_manager.connect(user_id, client_type, websocket)
-    audio_buffer = bytearray()
+async def process_voice_commit(audio_buffer: bytearray, channel, user_id: str):
+    text = ""
+    if len(audio_buffer) > 0:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+            temp_filename = temp_wav.name
+            with wave.open(temp_filename, "wb") as wf:
+                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+                wf.writeframes(audio_buffer)
+                
+        try:
+            segments, _ = whisper_model.transcribe(temp_filename, beam_size=1, language="en", condition_on_previous_text=False)
+            text = " ".join([s.text for s in segments]).strip()
+        except Exception as e: 
+            print(f"Transcribe Error: {e}")
+        
+        try: os.remove(temp_filename)
+        except: pass
 
-    try:
-        if client_type == "app":
-            while True: await websocket.receive_text()
+    print(f"🗣️ {user_id}: {text}")
 
-        elif client_type == "device":
-            if not whisper_model: 
-                print("❌ No Whisper model loaded in shared.models. Closing socket.")
-                await websocket.close()
-                return
-            
-            while True:
-                data = await websocket.receive()
-                if "text" in data and data["text"] == "PING": continue 
+    if text:
+        await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
+        is_command, response_text = action_engine.execute(text)
 
-                if "bytes" in data:
-                    audio_buffer.extend(data["bytes"])
+        if is_command:
+            print(f"🤖 Action Executed: {response_text}")
+            await speak_simple_message(response_text, channel, user_id)
+        else:
+            await stream_audio_response_rtc(text, channel, user_id)
 
-                # ⚡ ADD THIS: Clear the buffer if the client says the audio was junk
-                elif "text" in data and data["text"] == "CLEAR":
+        # Give the audio chunks time to reach the client before sending the STOP signal
+        await asyncio.sleep(0.5)
+        if channel.readyState == "open":
+            channel.send("END_OF_RESPONSE")
+    else:
+        if channel.readyState == "open":
+            channel.send("NO_SPEECH")
+
+# ==========================================
+# 🔌 WEBRTC SIGNALING ENDPOINT
+# ==========================================
+@router.post("/volco_webrtc/offer")
+async def webrtc_offer(request: Request):
+    params = await request.json()
+    user_id = params.get("user_id", "sogolo")
+    
+    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    pc = RTCPeerConnection()
+    active_connections.add(pc)
+
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        # ⚡ THE FIX: Lock the channel in memory so it doesn't get destroyed!
+        active_channels.add(channel) 
+        
+        print(f"⚡ [WEBRTC] UDP Channel '{channel.label}' opened for {user_id}")
+        audio_buffer = bytearray()
+
+        @channel.on("message")
+        def on_message(message):
+            nonlocal audio_buffer
+            if isinstance(message, bytes):
+                audio_buffer.extend(message)
+            elif isinstance(message, str):
+                if message == "PING": pass 
+                elif message == "CLEAR":
                     audio_buffer = bytearray()
-                    print(f"🗑️ {user_id}: Client ignored noise, buffer cleared.")
+                elif message == "COMMIT":
+                    asyncio.create_task(process_voice_commit(bytearray(audio_buffer), channel, user_id))
+                    audio_buffer = bytearray()
 
-                elif "text" in data and data["text"] == "COMMIT":
-                    text = ""
-                    # ... (the rest of the transcription logic stays the same)
-                    if len(audio_buffer) > 0:
-                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                            temp_filename = temp_wav.name
-                            with wave.open(temp_filename, "wb") as wf:
-                                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
-                                wf.writeframes(audio_buffer)
-                                
-                        try:
-                            # ⚡ Using the global whisper_model
-                            segments, _ = whisper_model.transcribe(temp_filename, beam_size=1, language="en", condition_on_previous_text=False)
-                            text = " ".join([s.text for s in segments]).strip()
-                        except Exception as e: print(f"Transcribe Error: {e}")
-                        
-                        try: os.remove(temp_filename)
-                        except: pass
-                        audio_buffer = bytearray() 
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        print(f"📶 [WEBRTC] Connection state: {pc.connectionState}")
+        if pc.connectionState in ["failed", "closed"]:
+            active_connections.discard(pc)
 
-                    print(f"🗣️ {user_id}: {text}")
+    await pc.setRemoteDescription(offer)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
 
-                    if text:
-                        await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
-
-                        # 1. Check for Action Commands
-                        is_command, response_text = action_engine.execute(text)
-
-                        if is_command:
-                            print(f"🤖 Action Executed: {response_text}")
-                            await speak_simple_message(response_text, websocket, user_id)
-                        else:
-                            # 2. Fallback to LLM Chat
-                            success = await stream_audio_response_ws(text, websocket, user_id)
-                            if not success: break 
-
-                        await websocket.send_text("END_OF_RESPONSE")
-                    else:
-                        await websocket.send_text("NO_SPEECH")
-
-    except WebSocketDisconnect: volco_manager.disconnect(user_id, client_type)
-    except RuntimeError: volco_manager.disconnect(user_id, client_type)
-    except Exception as e: print(f"Error: {e}"); volco_manager.disconnect(user_id, client_type)
+    return JSONResponse(
+        {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    )
