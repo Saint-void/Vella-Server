@@ -4,8 +4,9 @@ import wave
 import asyncio
 import tempfile
 import subprocess
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
@@ -16,6 +17,7 @@ from shared.models import whisper_model
 from volco.connection import volco_manager
 from volco.action_engine import ActionEngine
 from volco.agent import stream_generate
+from .db import authenticate_mobile_user  # ⚡ Added DB Import
 
 action_engine = ActionEngine()
 router = APIRouter()
@@ -182,3 +184,28 @@ async def webrtc_offer(request: Request):
     return JSONResponse(
         {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
     )
+
+# ==========================================
+# 🔐 MOBILE APP API ENDPOINTS (NEW)
+# ==========================================
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+@router.post("/api/volco/login")
+def mobile_login(request: LoginRequest):
+    print(f"🔐 Login attempt for: {request.email}")
+    
+    # Check the database
+    user = authenticate_mobile_user(request.email, request.password)
+    
+    if user:
+        print(f"✅ Login successful! User ID: {user['id']}")
+        return {
+            "success": True, 
+            "user_id": user['id'],
+            "name": user['name']
+        }
+    else:
+        print("❌ Login failed: Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
