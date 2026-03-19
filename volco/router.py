@@ -4,6 +4,7 @@ import wave
 import asyncio
 import tempfile
 import subprocess
+import json  # ⚡ NEW: Needed to stringify Spotify commands
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -17,14 +18,15 @@ from shared.models import whisper_model
 from volco.connection import volco_manager
 from volco.action_engine import ActionEngine
 from volco.agent import stream_generate
-from .db import authenticate_mobile_user  # ⚡ Added DB Import
+from .db import authenticate_mobile_user  
 
 action_engine = ActionEngine()
 router = APIRouter()
 
 # ⚡ THE FIX: Memory Locks to prevent Python from Garbage Collecting our connections
 active_connections = set()
-active_channels = set() 
+active_channels = set()
+user_interrupt_flags = {}
 
 # ==========================================
 # ⚙️ CONFIGURATION & PATHS
@@ -47,11 +49,10 @@ def generate_piper_pcm(text: str) -> bytes:
 # ⚡ THE FIX: THE PACED CHUNKER
 async def send_pcm_in_chunks(channel, pcm_data):
     """Slices massive audio files into 16KB chunks and PACES them over UDP."""
-    CHUNK_SIZE = 16384 # 16KB (about 0.5 seconds of audio)
+    CHUNK_SIZE = 16384 
     for i in range(0, len(pcm_data), CHUNK_SIZE):
         if channel.readyState == "open":
             channel.send(pcm_data[i:i+CHUNK_SIZE])
-            # Pace the stream so we don't flood the network and crash the socket!
             await asyncio.sleep(0.1) 
 
 # ==========================================
@@ -70,11 +71,20 @@ async def speak_simple_message(text: str, channel, user_id: str):
 async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
     buffer = ""
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
+    
+    # ⚡ Reset the flag before starting a new response
+    user_interrupt_flags[user_id] = False 
+    
     try:
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
         print(f"🤖 Volco: ", end="", flush=True)
         
         async for token in iterate_in_threadpool(stream_generate(prompt)):
+            # ⚡ THE KILL SWITCH: Check if the user interrupted
+            if user_interrupt_flags.get(user_id, False):
+                print("\n🛑 [SERVER] AI Generation aborted mid-sentence.")
+                break # Instantly escapes the loop!
+                
             buffer += token
             print(token, end="", flush=True)
             
@@ -83,10 +93,12 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
             if len(parts) > 1:
                 sentence = parts[0]; buffer = parts[1]
                 if sentence.strip():
+                    # Process TTS for this sentence
                     pcm = await asyncio.to_thread(generate_piper_pcm, sentence)
                     if pcm: await send_pcm_in_chunks(channel, pcm)
                     
-        if buffer.strip():
+        # ⚡ Only process the final chunk if we weren't interrupted
+        if buffer.strip() and not user_interrupt_flags.get(user_id, False):
             pcm = await asyncio.to_thread(generate_piper_pcm, buffer)
             if pcm: await send_pcm_in_chunks(channel, pcm)
             
@@ -122,15 +134,22 @@ async def process_voice_commit(audio_buffer: bytearray, channel, user_id: str):
 
     if text:
         await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
-        is_command, response_text = action_engine.execute(text)
+        
+        # ⚡ THE FIX: Unpack 3 values (is_command, voice_text, and the payload)
+        is_command, response_text, payload = action_engine.execute(text)
 
         if is_command:
             print(f"🤖 Action Executed: {response_text}")
+            
+            # ⚡ NEW: If the engine returned a Spotify command, send it to the Pi!
+            if payload and channel.readyState == "open":
+                channel.send(json.dumps(payload))
+                print(f"📡 Sent JSON Command to Headset: {payload}")
+
             await speak_simple_message(response_text, channel, user_id)
         else:
             await stream_audio_response_rtc(text, channel, user_id)
 
-        # Give the audio chunks time to reach the client before sending the STOP signal
         await asyncio.sleep(0.5)
         if channel.readyState == "open":
             channel.send("END_OF_RESPONSE")
@@ -152,7 +171,6 @@ async def webrtc_offer(request: Request):
 
     @pc.on("datachannel")
     def on_datachannel(channel):
-        # ⚡ THE FIX: Lock the channel in memory so it doesn't get destroyed!
         active_channels.add(channel) 
         
         print(f"⚡ [WEBRTC] UDP Channel '{channel.label}' opened for {user_id}")
@@ -170,6 +188,10 @@ async def webrtc_offer(request: Request):
                 elif message == "COMMIT":
                     asyncio.create_task(process_voice_commit(bytearray(audio_buffer), channel, user_id))
                     audio_buffer = bytearray()
+                # ⚡ NEW: CATCH THE KILL SIGNAL
+                elif message == "INTERRUPT":
+                    print(f"\n🛑 [SERVER] Interrupt received! Killing LLM & TTS for {user_id}...")
+                    user_interrupt_flags[user_id] = True
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
@@ -186,7 +208,7 @@ async def webrtc_offer(request: Request):
     )
 
 # ==========================================
-# 🔐 MOBILE APP API ENDPOINTS (NEW)
+# 🔐 MOBILE APP API ENDPOINTS
 # ==========================================
 class LoginRequest(BaseModel):
     email: str
@@ -195,17 +217,8 @@ class LoginRequest(BaseModel):
 @router.post("/api/volco/login")
 def mobile_login(request: LoginRequest):
     print(f"🔐 Login attempt for: {request.email}")
-    
-    # Check the database
     user = authenticate_mobile_user(request.email, request.password)
-    
     if user:
-        print(f"✅ Login successful! User ID: {user['id']}")
-        return {
-            "success": True, 
-            "user_id": user['id'],
-            "name": user['name']
-        }
+        return {"success": True, "user_id": user['id'], "name": user['name']}
     else:
-        print("❌ Login failed: Invalid credentials")
         raise HTTPException(status_code=401, detail="Invalid email or password")
