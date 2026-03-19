@@ -47,13 +47,18 @@ def generate_piper_pcm(text: str) -> bytes:
     except: return b""
 
 # ⚡ THE FIX: THE PACED CHUNKER
-async def send_pcm_in_chunks(channel, pcm_data):
-    """Slices massive audio files into 16KB chunks and PACES them over UDP."""
-    CHUNK_SIZE = 16384 
+async def send_pcm_in_chunks(channel, pcm_data, user_id):
+    CHUNK_SIZE = 16384
     for i in range(0, len(pcm_data), CHUNK_SIZE):
+
+        # 🛑 STOP IMMEDIATELY
+        if user_interrupt_flags.get(user_id, False):
+            print("🛑 [SERVER] Stopping PCM stream mid-playback.")
+            break
+
         if channel.readyState == "open":
             channel.send(pcm_data[i:i+CHUNK_SIZE])
-            await asyncio.sleep(0.1) 
+            await asyncio.sleep(0.02)
 
 # ==========================================
 # 🔄 STREAMING LOGIC
@@ -64,7 +69,7 @@ async def speak_simple_message(text: str, channel, user_id: str):
     
     pcm = await asyncio.to_thread(generate_piper_pcm, text)
     if pcm: 
-        await send_pcm_in_chunks(channel, pcm) 
+        await send_pcm_in_chunks(channel, pcm, user_id) 
         
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
 
@@ -80,10 +85,10 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
         print(f"🤖 Volco: ", end="", flush=True)
         
         async for token in iterate_in_threadpool(stream_generate(prompt)):
-            # ⚡ THE KILL SWITCH: Check if the user interrupted
             if user_interrupt_flags.get(user_id, False):
                 print("\n🛑 [SERVER] AI Generation aborted mid-sentence.")
-                break # Instantly escapes the loop!
+                stream_generate.close()  # ⚡ safely close the generator
+                break
                 
             buffer += token
             print(token, end="", flush=True)
@@ -95,12 +100,12 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
                 if sentence.strip():
                     # Process TTS for this sentence
                     pcm = await asyncio.to_thread(generate_piper_pcm, sentence)
-                    if pcm: await send_pcm_in_chunks(channel, pcm)
+                    if pcm: await send_pcm_in_chunks(channel, pcm, user_id)
                     
         # ⚡ Only process the final chunk if we weren't interrupted
         if buffer.strip() and not user_interrupt_flags.get(user_id, False):
             pcm = await asyncio.to_thread(generate_piper_pcm, buffer)
-            if pcm: await send_pcm_in_chunks(channel, pcm)
+            if pcm: await send_pcm_in_chunks(channel, pcm, user_id)
             
         print()
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
@@ -193,7 +198,12 @@ async def webrtc_offer(request: Request):
                     print(f"\n🛑 [SERVER] Interrupt received! Killing LLM & TTS for {user_id}...")
                     user_interrupt_flags[user_id] = True
 
-    @pc.on("connectionstatechange")
+                    # 🔥 Force flush behavior
+                    asyncio.create_task(
+                        volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
+                    )
+
+    @pc.on("connectionstatechange") 
     async def on_connectionstatechange():
         print(f"📶 [WEBRTC] Connection state: {pc.connectionState}")
         if pc.connectionState in ["failed", "closed"]:

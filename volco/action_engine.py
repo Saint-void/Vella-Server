@@ -1,11 +1,7 @@
 import datetime
+import urllib.parse
 
 class ActionEngine:
-    def __init__(self):
-        # We don't need Spotify API keys here! 
-        # Volco has the master token on the hardware.
-        pass
-
     def execute(self, text: str):
         """
         Analyzes the text. If it's a command, returns:
@@ -16,22 +12,21 @@ class ActionEngine:
         # --- COMMAND 1: MUSIC PLAYBACK (SPOTIFY) ---
         if text.startswith("play"):
             query = text.replace("play", "").strip()
-            
-            # If you just say "Play", it resumes current music
-            if not query or query in ["music", "some music"]:
+            if not query:
+                # Just say "Play" → resume
                 return True, "Resuming Spotify.", {"action": "spotify_resume", "query": None}
-            
-            # If you specify a playlist
-            if query.startswith("playlist"):
-                playlist_name = query.replace("playlist", "").strip()
-                return True, f"Playing the playlist {playlist_name}.", {"action": "spotify_play_playlist", "query": playlist_name}
-            
-            # If you specify an album
-            if query.startswith("album"):
-                album_name = query.replace("album", "").strip()
+
+            # Album command
+            if "album" in query:
+                album_name = query.replace("album", "").replace("for me", "").strip()
                 return True, f"Playing the album {album_name}.", {"action": "spotify_play_album", "query": album_name}
-            
-            # Default to playing a specific track/artist
+
+            # Playlist command
+            if "playlist" in query:
+                playlist_name = query.replace("playlist", "").replace("for me", "").strip()
+                return True, f"Playing the playlist {playlist_name}.", {"action": "spotify_play_playlist", "query": playlist_name}
+
+            # Default: track/artist
             return True, f"Playing {query}.", {"action": "spotify_play_track", "query": query}
 
         # --- COMMAND 2: MUSIC CONTROLS ---
@@ -53,5 +48,5 @@ class ActionEngine:
             today = datetime.datetime.now().strftime("%A, %B %d")
             return True, f"Today is {today}.", {"action": "none"}
 
-        # --- NOT A COMMAND (Send to LLM or regular chat) ---
+        # --- NOT A COMMAND ---
         return False, "", {}

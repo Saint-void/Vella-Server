@@ -1,38 +1,30 @@
-import torch
-from threading import Thread
-from transformers import TextIteratorStreamer
+from llama_cpp import Llama
+from typing import Any, Iterator
 
-# ⚡ IMPORT ALREADY LOADED MODELS FROM SHARED
-from shared.models import model, tokenizer
+# Load model once
+llm = Llama(
+    model_path= r"V:\Document\Vella-Modes\models\volco_llm\TinyLlama_1_1B_Chat_v1_0_Q4_K_M.gguf",
+    n_ctx=2048,
+    n_threads=4,
+    verbose=False
+)
 
-def stream_generate(prompt: str):
-    """Yields words one by one, strictly formatted for short voice replies."""
+def stream_generate(prompt: str) -> Iterator[str]:
+    """Yields tokens with explicit typing to fix Pylance errors."""
     
-    # TinyLlama Chat Format + Strict System Rule
-    system_prompt = "You are Volco, a voice assistant. Answer in exactly one short sentence."
-    final_prompt = f"<|system|>\n{system_prompt}</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n"
-    
-    inputs = tokenizer([final_prompt], return_tensors="pt")
-    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-
-    generation_kwargs = dict(
-        **inputs,
-        streamer=streamer,
-        max_new_tokens=40,      # Strict limit for voice
-        pad_token_id=tokenizer.eos_token_id,
-        do_sample=True,
-        temperature=0.7,
-        top_k=50,
-        top_p=0.95,
-        repetition_penalty=1.2
+    stream: Any = llm.create_chat_completion(
+        messages=[
+            {"role": "system", "content": "You are Volco, a voice assistant. Be brief and friendly."},
+            {"role": "user", "content": prompt}
+        ],
+        stream=True,
+        max_tokens=80
     )
 
-    thread = Thread(target=model.generate, kwargs=generation_kwargs)
-    thread.start()
-
-    for new_text in streamer:
-        # Early cutoff: Stop if it tries to hallucinate a new line
-        if "\n" in new_text:
-            yield new_text.split("\n")[0]
-            break
-        yield new_text
+    for chunk in stream:
+        # Use .get() safely and ignore type-checking for this line
+        delta = chunk['choices'][0].get('delta', {}) # type: ignore
+        if 'content' in delta:
+            content = delta['content']
+            if content:
+                yield str(content)
