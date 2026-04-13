@@ -1,30 +1,43 @@
-from llama_cpp import Llama
-from typing import Any, Iterator
+from threading import Thread
+from typing import Iterator
+from transformers import TextIteratorStreamer
 
-# Load model once
-llm = Llama(
-    model_path= r"V:\Document\Vella-Modes\models\volco_llm\TinyLlama_1_1B_Chat_v1_0_Q4_K_M.gguf",
-    n_ctx=2048,
-    n_threads=4,
-    verbose=False
-)
+# 👇 Import the shared models
+from shared.models import model, tokenizer
+from .constants import VOLCO_SYSTEM_INSTRUCTION
+
+def format_chat_prompt(user_message: str):
+    messages = [
+        {"role": "system", "content": VOLCO_SYSTEM_INSTRUCTION},
+        {"role": "user", "content": user_message}
+    ]
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 def stream_generate(prompt: str) -> Iterator[str]:
-    """Yields tokens with explicit typing to fix Pylance errors."""
+    """Yields tokens from the shared Transformers model."""
     
-    stream: Any = llm.create_chat_completion(
-        messages=[
-            {"role": "system", "content": "You are Volco, a voice assistant. Be brief and friendly."},
-            {"role": "user", "content": prompt}
-        ],
-        stream=True,
-        max_tokens=80
+    formatted_prompt = format_chat_prompt(prompt)
+    
+    # ⚡ Use the same device as the model
+    inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
+
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+    generation_kwargs = dict(
+        **inputs,
+        streamer=streamer,
+        max_new_tokens=120, # Increased for slightly more detailed/soft responses
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        do_sample=True,
+        temperature=0.4,
+        top_k=40,
+        top_p=0.9,
+        repetition_penalty=1.1
     )
 
-    for chunk in stream:
-        # Use .get() safely and ignore type-checking for this line
-        delta = chunk['choices'][0].get('delta', {}) # type: ignore
-        if 'content' in delta:
-            content = delta['content']
-            if content:
-                yield str(content)
+    thread = Thread(target=model.generate, kwargs=generation_kwargs)
+    thread.start()
+
+    for new_text in streamer:
+        yield new_text

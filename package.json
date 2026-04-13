@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "accelerate": "^1.0.1"
+  }
+}

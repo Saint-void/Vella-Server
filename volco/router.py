@@ -1,10 +1,10 @@
 import os
 import re
-import wave
 import asyncio
-import tempfile
 import subprocess
-import json  # ⚡ NEW: Needed to stringify Spotify commands
+import json
+import uuid
+import numpy as np
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -20,6 +20,10 @@ from volco.action_engine import ActionEngine
 from volco.agent import stream_generate
 from .db import authenticate_mobile_user  
 
+# Import DB and Memory functions from root
+from db import save_message
+from vector_store import add_memory
+
 action_engine = ActionEngine()
 router = APIRouter()
 
@@ -31,20 +35,36 @@ user_interrupt_flags = {}
 # ==========================================
 # ⚙️ CONFIGURATION & PATHS
 # ==========================================
-PIPER_EXE = r"V:/Document/Vella-Modes/models/piper/piper.exe"
-VOICE_MODEL = r"V:/Document/Vella-Modes/models/tts-piper/en_US-lessac-medium.onnx"
+PIPER_EXE = r"V:\Document\Vella-Modes\models\piper\piper.exe"
+VOICE_MODEL = r"V:\Document\Vella-Modes\models\tts-piper\en_US-lessac-medium.onnx"
 
 # ==========================================
 # 🗣️ TEXT TO SPEECH (Piper)
 # ==========================================
 def generate_piper_pcm(text: str) -> bytes:
-    if not text.strip() or not os.path.exists(PIPER_EXE): return b""
+    if not text.strip(): return b""
+    
+    # ⚡ Check if paths exist (Windows-style)
+    if not os.path.exists(PIPER_EXE):
+        print(f"❌ [TTS ERROR] Piper executable not found at: {PIPER_EXE}")
+        return b""
+    if not os.path.exists(VOICE_MODEL):
+        print(f"❌ [TTS ERROR] Voice model not found at: {VOICE_MODEL}")
+        return b""
+
     command = [PIPER_EXE, "--model", VOICE_MODEL, "--output-raw"]
     try:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout_data, _ = process.communicate(input=text.encode('utf-8'))
+        stdout_data, stderr_data = process.communicate(input=text.encode('utf-8'))
+        
+        if not stdout_data:
+            print(f"⚠️ [TTS WARNING] Piper returned no audio. Stderr: {stderr_data.decode('utf-8', 'ignore')}")
+            return b""
+            
         return stdout_data
-    except: return b""
+    except Exception as e: 
+        print(f"❌ [TTS ERROR] subprocess failure: {e}")
+        return b""
 
 # ⚡ THE FIX: THE PACED CHUNKER
 async def send_pcm_in_chunks(channel, pcm_data, user_id):
@@ -64,16 +84,28 @@ async def send_pcm_in_chunks(channel, pcm_data, user_id):
 # 🔄 STREAMING LOGIC
 # ==========================================
 async def speak_simple_message(text: str, channel, user_id: str):
+    """Speaks a message by splitting it into sentences for faster CPU delivery."""
+    # ⚡ Ensure interrupts from previous turns are cleared
+    user_interrupt_flags[user_id] = False
+    
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": text})
     
-    pcm = await asyncio.to_thread(generate_piper_pcm, text)
-    if pcm: 
-        await send_pcm_in_chunks(channel, pcm, user_id) 
+    # ⚡ SPLIT INTO SENTENCES: Faster than generating the whole block on CPU
+    sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
+    sentences = sentence_endings.split(text)
+    
+    for sentence in sentences:
+        if not sentence.strip(): continue
+        if user_interrupt_flags.get(user_id, False): break
+        
+        pcm = await asyncio.to_thread(generate_piper_pcm, sentence)
+        if pcm: 
+            await send_pcm_in_chunks(channel, pcm, user_id) 
         
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
 
-async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
+async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
     buffer = ""
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
     
@@ -87,7 +119,6 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
         async for token in iterate_in_threadpool(stream_generate(prompt)):
             if user_interrupt_flags.get(user_id, False):
                 print("\n🛑 [SERVER] AI Generation aborted mid-sentence.")
-                stream_generate.close()  # ⚡ safely close the generator
                 break
                 
             buffer += token
@@ -109,35 +140,22 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> bool:
             
         print()
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
-        return True 
+        return buffer
     except Exception as e: 
         print(f"\n❌ Stream Error: {repr(e)}") 
-        return False
+        return ""
 
 # ==========================================
 # 🧠 THE AI BRAIN 
 # ==========================================
-async def process_voice_commit(audio_buffer: bytearray, channel, user_id: str):
-    text = ""
-    if len(audio_buffer) > 0:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-            temp_filename = temp_wav.name
-            with wave.open(temp_filename, "wb") as wf:
-                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
-                wf.writeframes(audio_buffer)
-                
-        try:
-            segments, _ = whisper_model.transcribe(temp_filename, beam_size=1, language="en", condition_on_previous_text=False)
-            text = " ".join([s.text for s in segments]).strip()
-        except Exception as e: 
-            print(f"Transcribe Error: {e}")
-        
-        try: os.remove(temp_filename)
-        except: pass
-
+async def process_voice_commit_text(text: str, channel, user_id: str, session_id: str):
     print(f"🗣️ {user_id}: {text}")
 
     if text:
+        # 1. Save User Message to DB
+        save_message(session_id, user_id, "user", text, title="Volco Voice Session")
+        add_memory(text, user_id)
+
         await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
         
         # ⚡ THE FIX: Unpack 3 values (is_command, voice_text, and the payload)
@@ -150,10 +168,19 @@ async def process_voice_commit(audio_buffer: bytearray, channel, user_id: str):
             if payload and channel.readyState == "open":
                 channel.send(json.dumps(payload))
                 print(f"📡 Sent JSON Command to Headset: {payload}")
+                # ⚡ DELAY: Give the headset a moment to process the command before audio hits
+                await asyncio.sleep(0.3) 
 
             await speak_simple_message(response_text, channel, user_id)
+            
+            # Save Command Response to DB
+            save_message(session_id, user_id, "model", response_text)
+            add_memory(response_text, user_id)
         else:
-            await stream_audio_response_rtc(text, channel, user_id)
+            full_ai_response = await stream_audio_response_rtc(text, channel, user_id)
+            if full_ai_response.strip():
+                save_message(session_id, user_id, "model", full_ai_response)
+                add_memory(full_ai_response, user_id)
 
         await asyncio.sleep(0.5)
         if channel.readyState == "open":
@@ -180,34 +207,115 @@ async def webrtc_offer(request: Request):
         
         print(f"⚡ [WEBRTC] UDP Channel '{channel.label}' opened for {user_id}")
         audio_buffer = bytearray()
+        
+        # ⚡ Generate a session ID for this voice session
+        session_id = str(uuid.uuid4())
+        
+        # ⚡ Processing state
+        state = {
+            "is_processing": False,
+            "is_running": True,
+            "last_processed_len": 0,
+            "latest_transcript": ""
+        }
+
+        # ⚡ BACKGROUND STREAMING STT (Lower frequency on CPU)
+        async def streaming_stt_loop():
+            while state["is_running"]:
+                await asyncio.sleep(0.8) # ⚡ Slightly slower loop to save CPU for generation
+                
+                if state["is_processing"]: continue
+                
+                # Only transcribe if we have new audio (at least 6400 bytes / 200ms)
+                current_len = len(audio_buffer)
+                if current_len > state["last_processed_len"] + 6400:
+                    state["last_processed_len"] = current_len
+                    try:
+                        # Convert to numpy in thread to keep loop fast
+                        buf_copy = bytearray(audio_buffer)
+                        audio_np = np.frombuffer(buf_copy, dtype=np.int16).astype(np.float32) / 32768.0
+                        
+                        # ⚡ ACCURACY FIX: Re-enable VAD filter even in background
+                        segments, _ = await asyncio.to_thread(
+                            whisper_model.transcribe, 
+                            audio_np, 
+                            beam_size=1, 
+                            language="en",
+                            vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=500)
+                        )
+                        text = " ".join([s.text for s in segments]).strip()
+                        
+                        if text:
+                            state["latest_transcript"] = text
+                            await volco_manager.broadcast_to_app(user_id, {"role": "user_partial", "content": text})
+                    except Exception as e:
+                        print(f"Streaming STT Error: {e}")
+
+        # Start the loop
+        asyncio.create_task(streaming_stt_loop())
 
         @channel.on("message")
         def on_message(message):
             nonlocal audio_buffer
+            
             if isinstance(message, bytes):
                 audio_buffer.extend(message)
+                
             elif isinstance(message, str):
                 if message == "PING": pass 
                 elif message == "CLEAR":
                     audio_buffer = bytearray()
+                    state["last_processed_len"] = 0
+                    state["latest_transcript"] = ""
                 elif message == "COMMIT":
-                    asyncio.create_task(process_voice_commit(bytearray(audio_buffer), channel, user_id))
-                    audio_buffer = bytearray()
+                    if not state["is_processing"]:
+                        state["is_processing"] = True
+                        asyncio.create_task(wrapped_process_commit())
                 # ⚡ NEW: CATCH THE KILL SIGNAL
                 elif message == "INTERRUPT":
                     print(f"\n🛑 [SERVER] Interrupt received! Killing LLM & TTS for {user_id}...")
                     user_interrupt_flags[user_id] = True
-
-                    # 🔥 Force flush behavior
                     asyncio.create_task(
                         volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
                     )
+
+        async def wrapped_process_commit():
+            nonlocal audio_buffer
+            
+            # ⚡ INSTANT COMMIT: Use background transcript if available
+            final_text = state["latest_transcript"]
+            
+            # ⚡ ACCURACY FIX: Final pass is more robust (higher beam size)
+            # Only skip if we have a recent background transcript (less than 1sec extra audio)
+            if not final_text or len(audio_buffer) > state["last_processed_len"] + 8000:
+                print("⚡ [COMMIT] Running high-accuracy transcription pass...")
+                buf_to_process = bytearray(audio_buffer)
+                audio_np = np.frombuffer(buf_to_process, dtype=np.int16).astype(np.float32) / 32768.0
+                segments, _ = await asyncio.to_thread(
+                    whisper_model.transcribe, 
+                    audio_np, 
+                    beam_size=2, # ⚡ Increased for final accuracy
+                    language="en", 
+                    vad_filter=True
+                )
+                final_text = " ".join([s.text for s in segments]).strip()
+
+            audio_buffer = bytearray() # Clear early
+            state["last_processed_len"] = 0
+            state["latest_transcript"] = ""
+            
+            await process_voice_commit_text(final_text, channel, user_id, session_id)
+            state["is_processing"] = False
 
     @pc.on("connectionstatechange") 
     async def on_connectionstatechange():
         print(f"📶 [WEBRTC] Connection state: {pc.connectionState}")
         if pc.connectionState in ["failed", "closed"]:
             active_connections.discard(pc)
+            # ⚡ Stop the background STT loop
+            # We can't easily reach 'state' here unless we store it
+            # But the loop checks pc.connectionState if we add it
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()

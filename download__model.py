@@ -1,25 +1,34 @@
 import os
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
-# 1. The exact folder path you want
-local_path = r"V:/Document/Vella-Modes/models/models--distil-whisper--distil-large-v3/snapshots/latest"
+# 1. The GGUF Repo (already has the weights)
+gguf_path = r"V:/Document/Vella-Modes/models/gemma-3-1b-it-gguf"
+# 2. The Base Repo (for tokenizer)
+base_repo = "google/gemma-3-1b-it"
 
-# 2. The Repo ID for the CTranslate2 version of Distil-Large-V3
-# (This is the specific format faster-whisper needs)
-repo_id = "Systran/faster-distil-whisper-small-v3"
+print(f"🚀 Fetching missing tokenizer files from {base_repo}...")
 
-print(f"🚀 Downloading {repo_id}...")
-print(f"📂 Destination: {local_path}")
+tokenizer_files = [
+    "tokenizer.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "config.json"
+]
 
 try:
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=local_path,
-        local_dir_use_symlinks=False, # Downloads actual files, not links
-        allow_patterns=["config.json", "model.bin", "vocabulary.json"] # Get only essential files
-    )
-    print("\n✅ Download Complete!")
-    print("You can now run your router.")
+    os.makedirs(gguf_path, exist_ok=True)
+    
+    for file in tokenizer_files:
+        print(f"📥 Downloading {file}...")
+        hf_hub_download(
+            repo_id=base_repo,
+            filename=file,
+            local_dir=gguf_path,
+            local_dir_use_symlinks=False
+        )
+    
+    print("\n✅ Tokenizer files downloaded successfully!")
 
 except Exception as e:
     print(f"\n❌ Error: {e}")
