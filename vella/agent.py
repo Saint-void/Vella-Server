@@ -1,22 +1,27 @@
 # backend/vella/agent.py
 import torch
 from threading import Thread
+from typing import List, Dict
 from transformers import TextIteratorStreamer
 
 # 👇 Import the shared models and Vella's specific prompt
 from shared.models import model, tokenizer
 from vella.constants import VELLA_SYSTEM_INSTRUCTION
 
-def format_chat_prompt(user_message: str):
-    messages = [
-        {"role": "system", "content": VELLA_SYSTEM_INSTRUCTION},
-        {"role": "user", "content": user_message}
-    ]
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+def format_chat_prompt(messages: List[Dict[str, str]]):
+    """
+    Expects messages in format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+    Prepends the system instruction.
+    """
+    full_messages = [{"role": "system", "content": VELLA_SYSTEM_INSTRUCTION}] + messages
+    return tokenizer.apply_chat_template(full_messages, tokenize=False, add_generation_prompt=True)
 
-def stream_generate(prompt: str, max_new_tokens: int = 512):
-    formatted_prompt = format_chat_prompt(prompt)
-    inputs = tokenizer(formatted_prompt, return_tensors="pt")
+def stream_generate(messages: List[Dict[str, str]], max_new_tokens: int = 512):
+    """
+    Generates a response based on the full conversation history.
+    """
+    formatted_prompt = format_chat_prompt(messages)
+    inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 

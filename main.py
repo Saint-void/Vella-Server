@@ -80,12 +80,37 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     session_id = request.headers.get("x-session-id")
     if not session_id or session_id == "null": session_id = str(uuid.uuid4())
 
+    # 1. Fetch Chat History (mapped to model roles)
+    raw_history = get_chat_history(session_id)
+    temp_history = []
+    for msg in raw_history:
+        role = "assistant" if msg["role"] == "model" else "user"
+        temp_history.append({"role": role, "content": msg["content"]})
+    
+    # 2. Add current user prompt
+    temp_history.append({"role": "user", "content": req.prompt})
+
+    # 3. CLEANUP: Ensure alternating roles (merge same-role consecutive messages)
+    chat_history = []
+    if temp_history:
+        for msg in temp_history:
+            if chat_history and chat_history[-1]["role"] == msg["role"]:
+                # Merge with previous message if role is the same
+                chat_history[-1]["content"] += "\n" + msg["content"]
+            else:
+                chat_history.append(msg)
+
+    # 4. Limit to last 6 messages (after merging) to keep context lean
+    chat_history = chat_history[-6:]
+    
+    # 5. Save user message to DB
     save_message(session_id, user_id, "user", req.prompt)
 
     async def response_generator():
         yield "" 
         full_response = ""
-        async for token in iterate_in_threadpool(stream_generate(req.prompt, max_new_tokens=req.max_new_tokens)):
+        # 6. Generate with cleaned history
+        async for token in iterate_in_threadpool(stream_generate(chat_history, max_new_tokens=req.max_new_tokens)):
             full_response += token
             yield token 
         
