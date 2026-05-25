@@ -35,8 +35,10 @@ user_interrupt_flags = {}
 # ==========================================
 # ⚙️ CONFIGURATION & PATHS
 # ==========================================
-PIPER_EXE = r"V:\Document\Vella-Modes\models\piper\piper.exe"
-VOICE_MODEL = r"V:\Document\Vella-Modes\models\tts-piper\en_US-lessac-medium.onnx"
+BASE_MODELS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
+# On macOS, Piper is a binary (no .exe)
+PIPER_EXE = os.path.join(BASE_MODELS_PATH, "piper", "piper")
+VOICE_MODEL = os.path.join(BASE_MODELS_PATH, "tts-piper", "en_US-lessac-medium.onnx")
 
 # ==========================================
 # 🗣️ TEXT TO SPEECH (Piper)
@@ -44,7 +46,7 @@ VOICE_MODEL = r"V:\Document\Vella-Modes\models\tts-piper\en_US-lessac-medium.onn
 def generate_piper_pcm(text: str) -> bytes:
     if not text.strip(): return b""
     
-    # ⚡ Check if paths exist (Windows-style)
+    # ⚡ Check if paths exist
     if not os.path.exists(PIPER_EXE):
         print(f"❌ [TTS ERROR] Piper executable not found at: {PIPER_EXE}")
         return b""
