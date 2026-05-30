@@ -1,7 +1,5 @@
-import os
 import re
 import asyncio
-import subprocess
 import json
 import uuid
 import numpy as np
@@ -11,8 +9,8 @@ from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
-# ⚡ IMPORT ALREADY LOADED WHISPER FROM SHARED
-from shared.models import whisper_model
+# ⚡ IMPORT ALREADY LOADED MODELS FROM SHARED
+from shared.models import whisper_model, piper_voice
 
 # Import Volco-specific modules
 from volco.connection import volco_manager
@@ -33,39 +31,25 @@ active_channels = set()
 user_interrupt_flags = {}
 
 # ==========================================
-# ⚙️ CONFIGURATION & PATHS
-# ==========================================
-BASE_MODELS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
-# On macOS, Piper is a binary (no .exe)
-PIPER_EXE = os.path.join(BASE_MODELS_PATH, "piper", "piper")
-VOICE_MODEL = os.path.join(BASE_MODELS_PATH, "tts-piper", "en_US-lessac-medium.onnx")
-
-# ==========================================
 # 🗣️ TEXT TO SPEECH (Piper)
 # ==========================================
 def generate_piper_pcm(text: str) -> bytes:
-    if not text.strip(): return b""
-    
-    # ⚡ Check if paths exist
-    if not os.path.exists(PIPER_EXE):
-        print(f"❌ [TTS ERROR] Piper executable not found at: {PIPER_EXE}")
-        return b""
-    if not os.path.exists(VOICE_MODEL):
-        print(f"❌ [TTS ERROR] Voice model not found at: {VOICE_MODEL}")
+    text = text.strip()
+    if not text:
         return b""
 
-    command = [PIPER_EXE, "--model", VOICE_MODEL, "--output-raw"]
     try:
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout_data, stderr_data = process.communicate(input=text.encode('utf-8'))
-        
-        if not stdout_data:
-            print(f"⚠️ [TTS WARNING] Piper returned no audio. Stderr: {stderr_data.decode('utf-8', 'ignore')}")
+        audio_data = bytearray()
+        for chunk in piper_voice.synthesize(text):
+            audio_data.extend(chunk.audio_int16_bytes)
+
+        if not audio_data:
+            print("⚠️ [TTS WARNING] Piper returned no audio.")
             return b""
-            
-        return stdout_data
+
+        return bytes(audio_data)
     except Exception as e: 
-        print(f"❌ [TTS ERROR] subprocess failure: {e}")
+        print(f"❌ [TTS ERROR] Native Piper synthesis failure: {e}")
         return b""
 
 # ⚡ THE FIX: THE PACED CHUNKER
@@ -306,6 +290,14 @@ async def webrtc_offer(request: Request):
             audio_buffer = bytearray() # Clear early
             state["last_processed_len"] = 0
             state["latest_transcript"] = ""
+
+            final_text = final_text.strip()
+            if not final_text:
+                print("🔇 [COMMIT] Ignored empty/no-speech commit.")
+                if channel.readyState == "open":
+                    channel.send("NO_SPEECH")
+                state["is_processing"] = False
+                return
             
             await process_voice_commit_text(final_text, channel, user_id, session_id)
             state["is_processing"] = False
