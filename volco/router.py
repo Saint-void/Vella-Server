@@ -2,7 +2,6 @@ import re
 import asyncio
 import json
 import uuid
-import numpy as np
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -16,6 +15,8 @@ from shared.models import whisper_model, piper_voice
 from volco.connection import volco_manager
 from volco.action_engine import ActionEngine
 from volco.agent import stream_generate
+from volco.asr_engine import ASRConfig, WhisperASREngine
+from volco.state_machine import VoiceSessionStateMachine, log_voice_event
 from .db import authenticate_mobile_user  
 
 # Import DB and Memory functions from root
@@ -23,6 +24,7 @@ from db import save_message
 from vector_store import add_memory
 
 action_engine = ActionEngine()
+asr_engine = WhisperASREngine(whisper_model, ASRConfig(sample_rate=16000))
 router = APIRouter()
 
 # ⚡ THE FIX: Memory Locks to prevent Python from Garbage Collecting our connections
@@ -186,6 +188,7 @@ async def webrtc_offer(request: Request):
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
     pc = RTCPeerConnection()
     active_connections.add(pc)
+    connection_context = {"channel": None, "state": None, "voice_state": None}
 
     @pc.on("datachannel")
     def on_datachannel(channel):
@@ -196,64 +199,35 @@ async def webrtc_offer(request: Request):
         
         # ⚡ Generate a session ID for this voice session
         session_id = str(uuid.uuid4())
+        voice_state = VoiceSessionStateMachine()
         
         # ⚡ Processing state
         state = {
             "is_processing": False,
-            "is_running": True,
-            "last_processed_len": 0,
-            "latest_transcript": ""
+            "is_running": True
         }
-
-        # ⚡ BACKGROUND STREAMING STT (Lower frequency on CPU)
-        async def streaming_stt_loop():
-            while state["is_running"]:
-                await asyncio.sleep(0.8) # ⚡ Slightly slower loop to save CPU for generation
-                
-                if state["is_processing"]: continue
-                
-                # Only transcribe if we have new audio (at least 6400 bytes / 200ms)
-                current_len = len(audio_buffer)
-                if current_len > state["last_processed_len"] + 6400:
-                    state["last_processed_len"] = current_len
-                    try:
-                        # Convert to numpy in thread to keep loop fast
-                        buf_copy = bytearray(audio_buffer)
-                        audio_np = np.frombuffer(buf_copy, dtype=np.int16).astype(np.float32) / 32768.0
-                        
-                        # ⚡ ACCURACY FIX: Re-enable VAD filter even in background
-                        segments, _ = await asyncio.to_thread(
-                            whisper_model.transcribe, 
-                            audio_np, 
-                            beam_size=1, 
-                            language="en",
-                            vad_filter=True,
-                            vad_parameters=dict(min_silence_duration_ms=500)
-                        )
-                        text = " ".join([s.text for s in segments]).strip()
-                        
-                        if text:
-                            state["latest_transcript"] = text
-                            await volco_manager.broadcast_to_app(user_id, {"role": "user_partial", "content": text})
-                    except Exception as e:
-                        print(f"Streaming STT Error: {e}")
-
-        # Start the loop
-        asyncio.create_task(streaming_stt_loop())
+        connection_context["channel"] = channel
+        connection_context["state"] = state
+        connection_context["voice_state"] = voice_state
 
         @channel.on("message")
         def on_message(message):
             nonlocal audio_buffer
             
             if isinstance(message, bytes):
+                if state["is_processing"]:
+                    log_voice_event("noise_filtered", reason="audio_received_while_processing", bytes=len(message))
+                    return
+                if not audio_buffer:
+                    voice_state.wake_word_detected()
+                    voice_state.start_listening()
                 audio_buffer.extend(message)
                 
             elif isinstance(message, str):
                 if message == "PING": pass 
                 elif message == "CLEAR":
                     audio_buffer = bytearray()
-                    state["last_processed_len"] = 0
-                    state["latest_transcript"] = ""
+                    voice_state.reset_to_idle("client_clear")
                 elif message == "COMMIT":
                     if not state["is_processing"]:
                         state["is_processing"] = True
@@ -268,48 +242,47 @@ async def webrtc_offer(request: Request):
 
         async def wrapped_process_commit():
             nonlocal audio_buffer
-            
-            # ⚡ INSTANT COMMIT: Use background transcript if available
-            final_text = state["latest_transcript"]
-            
-            # ⚡ ACCURACY FIX: Final pass is more robust (higher beam size)
-            # Only skip if we have a recent background transcript (less than 1sec extra audio)
-            if not final_text or len(audio_buffer) > state["last_processed_len"] + 8000:
-                print("⚡ [COMMIT] Running high-accuracy transcription pass...")
-                buf_to_process = bytearray(audio_buffer)
-                audio_np = np.frombuffer(buf_to_process, dtype=np.int16).astype(np.float32) / 32768.0
-                segments, _ = await asyncio.to_thread(
-                    whisper_model.transcribe, 
-                    audio_np, 
-                    beam_size=2, # ⚡ Increased for final accuracy
-                    language="en", 
-                    vad_filter=True
-                )
-                final_text = " ".join([s.text for s in segments]).strip()
+            try:
+                buf_to_process = bytes(audio_buffer)
+                audio_buffer = bytearray()
+                log_voice_event("endpoint_triggered", source="client", bytes=len(buf_to_process))
 
-            audio_buffer = bytearray() # Clear early
-            state["last_processed_len"] = 0
-            state["latest_transcript"] = ""
+                voice_state.processing_asr()
+                final_text = await asyncio.to_thread(asr_engine.transcribe_pcm, buf_to_process)
+                final_text = final_text.strip()
 
-            final_text = final_text.strip()
-            if not final_text:
-                print("🔇 [COMMIT] Ignored empty/no-speech commit.")
+                if not final_text:
+                    print("🔇 [COMMIT] Ignored empty/no-speech commit.")
+                    if channel.readyState == "open":
+                        channel.send("NO_SPEECH")
+                    voice_state.reset_to_idle("no_speech")
+                    return
+
+                voice_state.responding()
+                await process_voice_commit_text(final_text, channel, user_id, session_id)
+                voice_state.reset_to_idle("response_complete")
+            except Exception as e:
+                print(f"❌ [ASR] Commit processing failed: {e}")
                 if channel.readyState == "open":
                     channel.send("NO_SPEECH")
+                voice_state.reset_to_idle("asr_error")
+            finally:
                 state["is_processing"] = False
-                return
-            
-            await process_voice_commit_text(final_text, channel, user_id, session_id)
-            state["is_processing"] = False
 
     @pc.on("connectionstatechange") 
     async def on_connectionstatechange():
         print(f"📶 [WEBRTC] Connection state: {pc.connectionState}")
         if pc.connectionState in ["failed", "closed"]:
             active_connections.discard(pc)
-            # ⚡ Stop the background STT loop
-            # We can't easily reach 'state' here unless we store it
-            # But the loop checks pc.connectionState if we add it
+            channel_ref = connection_context.get("channel")
+            state_ref = connection_context.get("state")
+            voice_state_ref = connection_context.get("voice_state")
+            if state_ref:
+                state_ref["is_running"] = False
+            if channel_ref:
+                active_channels.discard(channel_ref)
+            if voice_state_ref:
+                voice_state_ref.reset_to_idle("connection_closed")
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()

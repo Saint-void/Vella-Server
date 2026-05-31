@@ -1,25 +1,58 @@
+import os
+import time
 import uuid
+
 import weaviate
-from sentence_transformers import SentenceTransformer
 
 # ============================
-# EMBEDDING MODEL
+# LAZY WEAVIATE CLIENT / EMBEDDER
 # ============================
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
-
-# ============================
-# WEAVIATE CLIENT
-# ============================
-client = weaviate.Client(
-    url="http://localhost:8080"
-)
-
 CLASS_NAME = "VellaMemory"
+WEAVIATE_URL = os.getenv("WEAVIATE_URL", "http://localhost:8080")
+WEAVIATE_RETRY_SECONDS = int(os.getenv("WEAVIATE_RETRY_SECONDS", "30"))
+
+_client = None
+_embedder = None
+_next_client_retry_at = 0.0
+
+
+def _get_client():
+    global _client, _next_client_retry_at
+
+    if _client is not None:
+        return _client
+
+    now = time.time()
+    if now < _next_client_retry_at:
+        return None
+
+    try:
+        _client = weaviate.Client(url=WEAVIATE_URL, startup_period=2)
+        print(f"✅ Weaviate connected at {WEAVIATE_URL}")
+        return _client
+    except Exception as e:
+        _next_client_retry_at = now + WEAVIATE_RETRY_SECONDS
+        print(f"⚠️ Weaviate unavailable at {WEAVIATE_URL}; memory disabled for now: {e}")
+        return None
+
+
+def _get_embedder():
+    global _embedder
+
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+
+        _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedder
 
 # ============================
 # SCHEMA SETUP
 # ============================
 def setup_schema():
+    client = _get_client()
+    if client is None:
+        return
+
     if client.schema.exists(CLASS_NAME):
         return
 
@@ -37,6 +70,11 @@ def setup_schema():
 # ADD MEMORY
 # ============================
 def add_memory(text: str, user_id: str):
+    client = _get_client()
+    if client is None:
+        return
+
+    embedder = _get_embedder()
     vector = embedder.encode(text).tolist()
 
     client.data_object.create(
@@ -57,6 +95,10 @@ def search_memory(prompt: str, user_id: str, fallback_count: int = 5) -> list[st
     Return a list of previous conversation texts for this user.
     Falls back to last N memories if semantic search returns nothing.
     """
+    client = _get_client()
+    if client is None:
+        return []
+
     try:
         # Try semantic search
         results = client.query.get(CLASS_NAME, ["text", "user_id"]) \
