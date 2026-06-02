@@ -13,7 +13,6 @@ from shared.models import whisper_model, piper_voice
 
 # Import Volco-specific modules
 from volco.connection import volco_manager
-from volco.action_engine import ActionEngine
 from volco.agent import stream_generate
 from volco.asr_engine import ASRConfig, WhisperASREngine
 from volco.state_machine import VoiceSessionStateMachine, log_voice_event
@@ -23,7 +22,6 @@ from .db import authenticate_mobile_user
 from db import save_message
 from vector_store import add_memory
 
-action_engine = ActionEngine()
 asr_engine = WhisperASREngine(whisper_model, ASRConfig(sample_rate=16000))
 router = APIRouter()
 
@@ -31,6 +29,50 @@ router = APIRouter()
 active_connections = set()
 active_channels = set()
 user_interrupt_flags = {}
+LOCAL_INTENT_TIMEOUT_SECONDS = 3.0
+
+
+def _action_payload_from_entities(intent: str, entities: dict) -> dict | None:
+    action = entities.get("action")
+    if not action:
+        return None
+
+    if intent == "PLAY_MUSIC":
+        return {"action": action, "query": entities.get("query", "")}
+    if intent == "STOP_MUSIC":
+        return {"action": action, "query": ""}
+    if intent == "SET_VOLUME":
+        return {"action": action, "level": entities.get("level")}
+    if intent == "GET_VOLUME":
+        return {"action": action}
+    if intent == "DEVICE_CONTROL":
+        return {"action": "device_control", "command": action, "device": entities.get("device", "")}
+    return None
+
+
+async def _request_local_intent(channel, pending_local_intents: dict, text: str, user_id: str) -> dict:
+    if channel.readyState != "open":
+        return {"intent": "GENERAL_CHAT", "entities": {}, "response": "", "should_call_llm": True}
+
+    request_id = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    pending_local_intents[request_id] = future
+
+    channel.send(json.dumps({
+        "action": "local_intent_request",
+        "request_id": request_id,
+        "text": text,
+        "user_id": user_id,
+    }))
+
+    try:
+        return await asyncio.wait_for(future, timeout=LOCAL_INTENT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        print("⚠️ [LOCAL INTENT] Volco did not respond in time. Falling back to LLM.")
+        return {"intent": "GENERAL_CHAT", "entities": {}, "response": "", "should_call_llm": True}
+    finally:
+        pending_local_intents.pop(request_id, None)
 
 # ==========================================
 # 🗣️ TEXT TO SPEECH (Piper)
@@ -136,35 +178,39 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
 # ==========================================
 # 🧠 THE AI BRAIN 
 # ==========================================
-async def process_voice_commit_text(text: str, channel, user_id: str, session_id: str):
+async def process_voice_commit_text(text: str, channel, user_id: str, session_id: str, pending_local_intents: dict):
     print(f"🗣️ {user_id}: {text}")
 
     if text:
+        keep_session_open = False
+
         # 1. Save User Message to DB
         save_message(session_id, user_id, "user", text, title="Volco Voice Session")
         add_memory(text, user_id)
 
         await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
-        
-        # ⚡ THE FIX: Unpack 3 values (is_command, voice_text, and the payload)
-        is_command, response_text, payload = action_engine.execute(text)
 
-        if is_command:
-            print(f"🤖 Action Executed: {response_text}")
-            
-            # ⚡ NEW: If the engine returned a Spotify command, send it to the Pi!
+        assistant_result = await _request_local_intent(channel, pending_local_intents, text, user_id)
+        intent = assistant_result.get("intent", "GENERAL_CHAT")
+        response_text = assistant_result.get("response", "")
+        entities = assistant_result.get("entities", {})
+        should_call_llm = assistant_result.get("should_call_llm", True)
+        payload = _action_payload_from_entities(intent, entities)
+
+        if not should_call_llm:
+            print(f"🧠 Local Intent: {intent} | {response_text}")
+
             if payload and channel.readyState == "open":
                 channel.send(json.dumps(payload))
                 print(f"📡 Sent JSON Command to Headset: {payload}")
-                # ⚡ DELAY: Give the headset a moment to process the command before audio hits
-                await asyncio.sleep(0.3) 
+                await asyncio.sleep(0.3)
 
             await speak_simple_message(response_text, channel, user_id)
-            
-            # Save Command Response to DB
+
             save_message(session_id, user_id, "model", response_text)
             add_memory(response_text, user_id)
         else:
+            keep_session_open = True
             full_ai_response = await stream_audio_response_rtc(text, channel, user_id)
             if full_ai_response.strip():
                 save_message(session_id, user_id, "model", full_ai_response)
@@ -172,6 +218,11 @@ async def process_voice_commit_text(text: str, channel, user_id: str, session_id
 
         await asyncio.sleep(0.5)
         if channel.readyState == "open":
+            channel.send(json.dumps({
+                "action": "none",
+                "continue_session": keep_session_open,
+                "end_session": not keep_session_open,
+            }))
             channel.send("END_OF_RESPONSE")
     else:
         if channel.readyState == "open":
@@ -200,6 +251,7 @@ async def webrtc_offer(request: Request):
         # ⚡ Generate a session ID for this voice session
         session_id = str(uuid.uuid4())
         voice_state = VoiceSessionStateMachine()
+        pending_local_intents = {}
         
         # ⚡ Processing state
         state = {
@@ -224,6 +276,18 @@ async def webrtc_offer(request: Request):
                 audio_buffer.extend(message)
                 
             elif isinstance(message, str):
+                if message.startswith("{"):
+                    try:
+                        payload = json.loads(message)
+                        if payload.get("action") == "local_intent_result":
+                            request_id = payload.get("request_id")
+                            future = pending_local_intents.get(request_id)
+                            if future and not future.done():
+                                future.set_result(payload.get("result", {}))
+                            return
+                    except json.JSONDecodeError:
+                        pass
+
                 if message == "PING": pass 
                 elif message == "CLEAR":
                     audio_buffer = bytearray()
@@ -259,7 +323,7 @@ async def webrtc_offer(request: Request):
                     return
 
                 voice_state.responding()
-                await process_voice_commit_text(final_text, channel, user_id, session_id)
+                await process_voice_commit_text(final_text, channel, user_id, session_id, pending_local_intents)
                 voice_state.reset_to_idle("response_complete")
             except Exception as e:
                 print(f"❌ [ASR] Commit processing failed: {e}")

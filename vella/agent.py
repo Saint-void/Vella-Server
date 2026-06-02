@@ -3,7 +3,7 @@ from typing import List, Dict
 from shared.models import llm
 from vella.constants import VELLA_SYSTEM_INSTRUCTION
 
-def stream_generate(messages: List[Dict[str, str]], max_new_tokens: int = 512):
+def stream_generate(messages: List[Dict[str, str]], max_new_tokens: int = 2048):
     """
     Generates a response using llama-cpp-python's create_chat_completion.
     Natively handles the Gemma-3 chat template.

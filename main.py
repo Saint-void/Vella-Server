@@ -13,7 +13,14 @@ from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool
 
 # --- NEW FOLDER IMPORTS ---
-from shared.models import whisper_model, piper_voice  # 👈 Loaded once natively from shared!
+from shared.models import (
+    KOKORO_DEFAULT_LANG,
+    KOKORO_DEFAULT_SPEED,
+    KOKORO_DEFAULT_VOICE,
+    kokoro_voice,
+    piper_voice,
+    whisper_model,
+)  # 👈 Loaded once natively from shared!
 from vella.agent import stream_generate         
 from auth import router as auth_router
 from vector_store import setup_schema, search_memory, add_memory
@@ -62,7 +69,7 @@ def remove_file(path: str):
 # =============================
 class ChatRequest(BaseModel):
     prompt: str
-    max_new_tokens: int = 512
+    max_new_tokens: int = 2048
 
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest, request: Request):
@@ -100,7 +107,8 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     async def response_generator():
         yield "" 
         full_response = ""
-        async for token in iterate_in_threadpool(stream_generate(chat_history, max_new_tokens=req.max_new_tokens)):
+        max_new_tokens = max(1, min(req.max_new_tokens, 3072))
+        async for token in iterate_in_threadpool(stream_generate(chat_history, max_new_tokens=max_new_tokens)):
             full_response += token
             yield token 
         
@@ -137,23 +145,35 @@ async def speech_to_text(audio: UploadFile = File(...)):
 
 class TTSRequest(BaseModel):
     text: str
+    voice: str | None = None
+    speed: float | None = None
+    lang: str | None = None
 
 @app.post("/tts")
 async def tts_endpoint(req: TTSRequest):
     try:
-        # Collect raw audio bytes from the generator
-        audio_data = bytearray()
-        for chunk in piper_voice.synthesize(req.text):
-            audio_data.extend(chunk.audio_int16_bytes)
-        
-        if not audio_data:
-            raise HTTPException(status_code=500, detail="No audio data generated")
+        if kokoro_voice is not None:
+            speed = req.speed if req.speed is not None else KOKORO_DEFAULT_SPEED
+            speed = max(0.5, min(speed, 2.0))
+            audio_np, sample_rate = kokoro_voice.create(
+                req.text,
+                voice=req.voice or KOKORO_DEFAULT_VOICE,
+                speed=speed,
+                lang=req.lang or KOKORO_DEFAULT_LANG,
+            )
+        else:
+            audio_data = bytearray()
+            for chunk in piper_voice.synthesize(req.text):
+                audio_data.extend(chunk.audio_int16_bytes)
 
-        # Convert raw int16 PCM to a proper WAV file with header
-        import io
-        audio_np = np.frombuffer(audio_data, dtype=np.int16)
+            if not audio_data:
+                raise HTTPException(status_code=500, detail="No audio data generated")
+
+            audio_np = np.frombuffer(audio_data, dtype=np.int16)
+            sample_rate = 22050
+
         wav_io = io.BytesIO()
-        sf.write(wav_io, audio_np, 22050, format='WAV') # Piper medium models use 22050Hz
+        sf.write(wav_io, audio_np, sample_rate, format='WAV')
         wav_io.seek(0)
 
         # Return the valid WAV file as a response

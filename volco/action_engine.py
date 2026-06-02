@@ -1,5 +1,31 @@
 import datetime
-import urllib.parse
+import re
+
+
+def _clean_music_query(query: str) -> str:
+    query = re.sub(r"\b(on|with)\s+spotify\b", "", query)
+    query = re.sub(r"\b(for me|please|now)\b", "", query)
+    return query.strip(" .,!?'\"")
+
+
+def _extract_music_query(text: str) -> str:
+    patterns = [
+        r"^(?:please\s+)?play\s+(.+)$",
+        r"^(?:can|could|would)\s+you\s+(?:please\s+)?play\s+(.+)$",
+        r"^(?:can|could|would)\s+you\s+(?:please\s+)?put\s+on\s+(.+)$",
+        r"^(?:please\s+)?put\s+on\s+(.+)$",
+        r"^(?:please\s+)?start\s+playing\s+(.+)$",
+        r"^i\s+(?:want|wanna|would\s+like)\s+to\s+(?:listen\s+to|hear|play)\s+(.+)$",
+        r"^let'?s\s+(?:listen\s+to|hear|play)\s+(.+)$",
+    ]
+
+    for pattern in patterns:
+        match = re.match(pattern, text)
+        if match:
+            return _clean_music_query(match.group(1))
+
+    return ""
+
 
 class ActionEngine:
     def execute(self, text: str):
@@ -10,10 +36,10 @@ class ActionEngine:
         text = text.lower().strip()
 
         # --- COMMAND 1: MUSIC PLAYBACK (SPOTIFY) ---
-        if text.startswith("play"):
-            query = text.replace("play", "").strip()
-            if not query:
-                # Just say "Play" → resume
+        query = _extract_music_query(text)
+        if query or text == "play":
+            if not query or query in {"music", "some music", "my music"}:
+                # Just say "Play" -> resume
                 return True, "Certainly. Resuming your music on Spotify.", {"action": "spotify_resume", "query": ""}
 
             # Album command
