@@ -3,7 +3,6 @@ import os
 import torch
 from llama_cpp import Llama
 from faster_whisper import WhisperModel
-from piper import PiperVoice  # 👈 Clean Python Import
 
 try:
     from kokoro_onnx import Kokoro
@@ -78,22 +77,5 @@ if Kokoro is not None and os.path.isfile(KOKORO_ONNX_PATH) and os.path.isfile(KO
 else:
     print("⚠️ Kokoro TTS not available. Falling back to Piper TTS.")
 
-# ==========================================
-# 4. LOAD PIPER TTS NATIVELY (FALLBACK / VOLCO)
-# ==========================================
-# Ensure this folder name matches your voice model's directory name inside models/
-PIPER_MODEL_DIR = os.path.join(BASE_MODELS_PATH, "piper")
-
-# Find the first .onnx file inside the directory automatically
-onnx_files = [f for f in os.listdir(PIPER_MODEL_DIR) if f.endswith('.onnx')] if os.path.exists(PIPER_MODEL_DIR) else []
-
-if not onnx_files:
-    raise FileNotFoundError(f"❌ Could not find an .onnx model file inside: {PIPER_MODEL_DIR}")
-
-PIPER_ONNX_PATH = os.path.join(PIPER_MODEL_DIR, onnx_files[0])
-PIPER_CONFIG_PATH = PIPER_ONNX_PATH + ".json"
-
-print(f"🗣️ Loading Global Piper TTS from: {PIPER_ONNX_PATH}...")
-piper_voice = PiperVoice.load(PIPER_ONNX_PATH, config_path=PIPER_CONFIG_PATH)
 
 print("✅ All Shared Models (Llama-CPP, Whisper, & Piper) Loaded Successfully!")

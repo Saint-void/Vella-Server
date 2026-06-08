@@ -18,7 +18,6 @@ from shared.models import (
     KOKORO_DEFAULT_SPEED,
     KOKORO_DEFAULT_VOICE,
     kokoro_voice,
-    piper_voice,
     whisper_model,
 )  # 👈 Loaded once natively from shared!
 from vella.agent import stream_generate         
@@ -163,9 +162,6 @@ async def tts_endpoint(req: TTSRequest):
             )
         else:
             audio_data = bytearray()
-            for chunk in piper_voice.synthesize(req.text):
-                audio_data.extend(chunk.audio_int16_bytes)
-
             if not audio_data:
                 raise HTTPException(status_code=500, detail="No audio data generated")
 

@@ -2,6 +2,7 @@ import re
 import asyncio
 import json
 import uuid
+import numpy as np
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -9,7 +10,7 @@ from starlette.concurrency import iterate_in_threadpool
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
 # ⚡ IMPORT ALREADY LOADED MODELS FROM SHARED
-from shared.models import whisper_model, piper_voice
+from shared.models import whisper_model, kokoro_voice
 
 # Import Volco-specific modules
 from volco.connection import volco_manager
@@ -75,25 +76,40 @@ async def _request_local_intent(channel, pending_local_intents: dict, text: str,
         pending_local_intents.pop(request_id, None)
 
 # ==========================================
-# 🗣️ TEXT TO SPEECH (Piper)
+# 🗣️ TEXT TO SPEECH (Kokoro ONNX)
 # ==========================================
-def generate_piper_pcm(text: str) -> bytes:
+def generate_kokoro_pcm(text: str) -> bytes:
+    """Generates 24kHz 16-bit Mono PCM audio using Kokoro ONNX."""
     text = text.strip()
     if not text:
         return b""
 
-    try:
-        audio_data = bytearray()
-        for chunk in piper_voice.synthesize(text):
-            audio_data.extend(chunk.audio_int16_bytes)
+    if kokoro_voice is None:
+        print("❌ [TTS ERROR] Kokoro voice engine is not available/initialized.")
+        return b""
 
-        if not audio_data:
-            print("⚠️ [TTS WARNING] Piper returned no audio.")
+    try:
+        # Kokoro returns a tuple of (audio_samples_ndarray, sample_rate)
+        audio_samples, sample_rate = kokoro_voice.create(
+            text=text,
+            voice="af_nova",  
+            speed=1.0,
+            lang="en-us"
+        )
+        
+        if audio_samples is None or len(audio_samples) == 0:
+            print("⚠️ [TTS WARNING] Kokoro returned no audio.")
             return b""
 
-        return bytes(audio_data)
+        # Clamp float32 outputs safely between -1.0 and 1.0 before scaling
+        audio_samples = np.clip(audio_samples, -1.0, 1.0)
+        
+        # Convert float32 array to 16-bit Signed Integer PCM bytes
+        pcm_16 = (audio_samples * 32767).astype(np.int16)
+        return pcm_16.tobytes()
+
     except Exception as e: 
-        print(f"❌ [TTS ERROR] Native Piper synthesis failure: {e}")
+        print(f"❌ [TTS ERROR] Native Kokoro synthesis failure: {e}")
         return b""
 
 # ⚡ THE FIX: THE PACED CHUNKER
@@ -126,10 +142,12 @@ async def speak_simple_message(text: str, channel, user_id: str):
     sentences = sentence_endings.split(text)
     
     for sentence in sentences:
-        if not sentence.strip(): continue
-        if user_interrupt_flags.get(user_id, False): break
+        if not sentence.strip(): 
+            continue
+        if user_interrupt_flags.get(user_id, False): 
+            break
         
-        pcm = await asyncio.to_thread(generate_piper_pcm, sentence)
+        pcm = await asyncio.to_thread(generate_kokoro_pcm, sentence)
         if pcm: 
             await send_pcm_in_chunks(channel, pcm, user_id) 
         
@@ -157,16 +175,19 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
             await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": token})
             parts = sentence_endings.split(buffer)
             if len(parts) > 1:
-                sentence = parts[0]; buffer = parts[1]
+                sentence = parts[0]
+                buffer = parts[1]
                 if sentence.strip():
-                    # Process TTS for this sentence
-                    pcm = await asyncio.to_thread(generate_piper_pcm, sentence)
-                    if pcm: await send_pcm_in_chunks(channel, pcm, user_id)
+                    # Process Kokoro TTS for this sentence
+                    pcm = await asyncio.to_thread(generate_kokoro_pcm, sentence)
+                    if pcm: 
+                        await send_pcm_in_chunks(channel, pcm, user_id)
                     
         # ⚡ Only process the final chunk if we weren't interrupted
         if buffer.strip() and not user_interrupt_flags.get(user_id, False):
-            pcm = await asyncio.to_thread(generate_piper_pcm, buffer)
-            if pcm: await send_pcm_in_chunks(channel, pcm, user_id)
+            pcm = await asyncio.to_thread(generate_kokoro_pcm, buffer)
+            if pcm: 
+                await send_pcm_in_chunks(channel, pcm, user_id)
             
         print()
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
@@ -288,7 +309,8 @@ async def webrtc_offer(request: Request):
                     except json.JSONDecodeError:
                         pass
 
-                if message == "PING": pass 
+                if message == "PING": 
+                    pass 
                 elif message == "CLEAR":
                     audio_buffer = bytearray()
                     voice_state.reset_to_idle("client_clear")
