@@ -1,4 +1,3 @@
-
 ---
 
 # 🧠 Vella & Volco AI Server (Backend)
@@ -7,8 +6,6 @@
 > *v7.2.0 | FastAPI | PostgreSQL | Kokoro ONNX TTS | Piper TTS Fallback | Llama-CPP (GGUF) | WebRTC*
 
 The Vella Server is the local backend that powers both the Vella Web Interface and the Volco Hardware/Voice Assistant.
-
-**New in v7.1.0:** 
 - **Llama-CPP Integration:** Migrated from `transformers` to `llama-cpp-python` for native GGUF support.
 - **Apple Silicon (MPS) Native:** Optimized to run the entire LLM graph on Metal performance shaders (`n_gpu_layers=-1`).
 - **Conversational Streaming:** Uses the `create_chat_completion` API for robust, template-free interaction with Gemma 3.
@@ -23,13 +20,12 @@ The Vella Server is the local backend that powers both the Vella Web Interface a
 
 ## 🛠️ Core Technology Stack
 
-* **API Framework:** `FastAPI` (Python 3.10+) running on `Uvicorn`.
-* **Database:** `PostgreSQL` & `Weaviate`.
-* **LLM Engine:** `Gemma 3 4B (GGUF Q4_K_M)` running via `llama-cpp-python` with **Full MPS (Metal) Acceleration**.
-* **Voice Engine:**
-  * **STT:** `Faster-Whisper medium.en` (running on optimized CPU int8 for Mac).
-  * **TTS:** `Kokoro ONNX` for Vella, with `Piper TTS` fallback.
-* **Real-Time Comm:** `WebRTC` (aiortc).
+- **API Framework:** `FastAPI` (Python 3.10+) running on `Uvicorn`.
+- **Database:** `PostgreSQL` & `Weaviate`.
+- **LLM Engine:** `Gemma 3 4B (GGUF Q4_K_M)` running via `llama-cpp-python` with **Full MPS (Metal) Acceleration**.
+- **Voice Engine:**
+  - **STT:** `Faster-Whisper medium.en` (running on optimized CPU int8 for Mac).
+- **Real-Time Comm:** `WebRTC` (aiortc).
 
 ---
 
@@ -37,11 +33,11 @@ The Vella Server is the local backend that powers both the Vella Web Interface a
 
 ### 1. Prerequisites
 
-* **Python 3.10+**
-* **PostgreSQL & Weaviate** installed and running.
-* **FFmpeg** installed (`brew install ffmpeg`).
-* **Kokoro ONNX model files:** Place in `../models/kokoro/`.
-* **Piper macOS Binary:** Place in `../models/piper/piper` and `chmod +x` for fallback/Volco compatibility.
+- **Python 3.10+**
+- **PostgreSQL & Weaviate** installed and running.
+- **FFmpeg** installed (`brew install ffmpeg`).
+- **Kokoro ONNX model files:** Place in `../models/kokoro/`.
+- **Piper macOS Binary:** Place in `../models/piper/piper` and `chmod +x` for fallback/Volco compatibility.
 
 ### 2. Installation
 
@@ -163,6 +159,7 @@ zm_yunyang
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8001
+scripts/start_vella.sh --daemon
 ```
 
 ---
@@ -183,4 +180,4 @@ vella-modes/
 
 ---
 
-**Developed by Void Tech.** *Private, Local, Intelligent.*
+**Developed by Void Tech.** _Private, Local, Intelligent._

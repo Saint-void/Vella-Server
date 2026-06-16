@@ -1,20 +1,25 @@
 # backend/volco/agent.py
 from typing import Iterator
+import os
 from shared.models import llm
 from .constants import VOLCO_SYSTEM_INSTRUCTION
 
-def stream_generate(prompt: str) -> Iterator[str]:
-    """Yields tokens from the shared Llama-CPP model via Apple Metal."""
-    
-    # ⚡ Conversational format for the completion engine
+# Default Ollama model for Volco (lightweight conversational)
+OLLAMA_VOLCO_DEFAULT = os.getenv("OLLAMA_VOLCO_DEFAULT_MODEL", "qwen3:1.7b")
+
+
+def stream_generate(prompt: str, model: str | None = None) -> Iterator[str]:
+    """Yields tokens from Ollama via the shared adapter."""
+    model_name = model or OLLAMA_VOLCO_DEFAULT
+
     messages = [
         {"role": "system", "content": VOLCO_SYSTEM_INSTRUCTION},
         {"role": "user", "content": prompt}
     ]
 
-    # ⚡ CHAT COMPLETION SYNTAX
     response_stream = llm.create_chat_completion(
-        messages=messages, # type: ignore
+        messages=messages,  # type: ignore
+        model=model_name,
         stream=True,
         max_tokens=1000,
         temperature=0.4,

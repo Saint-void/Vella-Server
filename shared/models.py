@@ -1,7 +1,8 @@
 # backend/shared/models.py
 import os
+import json
+import requests
 import torch
-from llama_cpp import Llama
 from faster_whisper import WhisperModel
 
 try:
@@ -16,24 +17,96 @@ torch.set_num_threads(num_threads)
 # Dynamic path resolution
 BASE_MODELS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
 
-# 1. LOAD GEMMA 3 4B GGUF via llama-cpp-python
-LLM_PATH = os.path.join(BASE_MODELS_PATH, "gemma-3-4b-it-gguf")
-GGUF_FILE = "google_gemma-3-4b-it-Q4_K_M.gguf"
-MODEL_PATH = os.path.join(LLM_PATH, GGUF_FILE)
+# ==========================================
+# ⚡ Ollama HTTP Adapter
+# ==========================================
+OLLAMA_DEFAULT = os.getenv("OLLAMA_DEFAULT_MODEL", "qwen3:8b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-if not os.path.isfile(MODEL_PATH):
-    raise FileNotFoundError(
-        f"Gemma model file not found at {MODEL_PATH}. "
-        "Make sure the Gemma 3 4B GGUF is present in the local models folder."
-    )
 
-print(f"🧠 Loading Global LLM (Gemma 3 4B GGUF) from: {MODEL_PATH} onto Apple Metal (MPS)...")
-llm = Llama(
-    model_path=MODEL_PATH,
-    n_gpu_layers=-1,
-    n_ctx=4096,
-    verbose=False
-)
+class OllamaLLM:
+    """Minimal Ollama HTTP adapter exposing a
+    `create_chat_completion(..., stream=True)` generator-compatible API
+    similar to `llama-cpp-python` so existing callers require minimal changes.
+    """
+
+    def __init__(self, default_model: str | None = None, base_url: str | None = None):
+        self.default_model = default_model or OLLAMA_DEFAULT
+        self.base_url = (base_url or OLLAMA_BASE_URL).rstrip("/")
+
+    def _messages_to_prompt(self, messages: list[dict]) -> str:
+        parts = []
+        for m in messages:
+            role = m.get("role", "user").lower()
+            content = m.get("content", "")
+            if role == "system":
+                parts.append(f"### System:\n{content}\n")
+            elif role == "user":
+                parts.append(f"### User:\n{content}\n")
+            elif role == "assistant":
+                parts.append(f"### Assistant:\n{content}\n")
+            else:
+                parts.append(f"### {role.title()}:\n{content}\n")
+        parts.append("### Assistant:\n")
+        return "\n".join(parts)
+
+    def create_chat_completion(self, *_, messages: list[dict] | None = None, prompt: str | None = None,
+                               model: str | None = None, stream: bool = True,
+                               max_tokens: int = 1024, temperature: float = 0.1, **kwargs):
+        """Blocking generator that yields chunks matching the llama-cpp `create_chat_completion` stream
+        shape: {'choices':[{'delta':{'content': '<token>'}}]}
+        """
+
+        model_name = model or self.default_model
+
+        if messages:
+            prompt_text = self._messages_to_prompt(messages)
+        elif prompt is not None:
+            prompt_text = prompt
+        else:
+            prompt_text = ""
+
+        body = {
+            "model": model_name,
+            "prompt": prompt_text,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True
+        }
+
+        url = f"{self.base_url}/api/generate"
+        resp = requests.post(url, json=body, stream=True, timeout=None)
+        resp.raise_for_status()
+
+        for raw in resp.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            # `raw` may be bytes or str depending on requests version/config.
+            if isinstance(raw, bytes):
+                s = raw.decode("utf-8", errors="replace").strip()
+            else:
+                s = raw.strip()
+            if s.startswith("data:"):
+                s = s[len("data:"):].strip()
+            token_text = None
+            try:
+                payload = json.loads(s)
+                if isinstance(payload, dict):
+                    token_text = payload.get("token") or payload.get("text") or payload.get("response") or payload.get("generated_text")
+                    if not token_text and payload.get("choices"):
+                        delta = payload["choices"][0].get("delta", {})
+                        token_text = delta.get("content")
+                else:
+                    token_text = str(payload)
+            except Exception:
+                token_text = s
+
+            if token_text:
+                yield {"choices": [{"delta": {"content": token_text}}]}
+
+
+# Export `llm` for compatibility
+llm = OllamaLLM()
 
 # 2. LOAD WHISPER
 WHISPER_PATH = os.path.join(BASE_MODELS_PATH, "models--Systran--faster-whisper-medium.en")
@@ -59,6 +132,28 @@ whisper_model = WhisperModel(
     cpu_threads=num_threads,
     download_root=None
 )
+
+# Optional: Volco can use a smaller Whisper model for low-latency STT.
+# Set `VOLCO_WHISPER_PATH` to a local model directory or a pretrained name.
+VOLCO_WHISPER_PATH = os.getenv("VOLCO_WHISPER_PATH", "")
+VOLCO_WHISPER_DEVICE = os.getenv("VOLCO_WHISPER_DEVICE", "cpu")
+VOLCO_WHISPER_COMPUTE = os.getenv("VOLCO_WHISPER_COMPUTE", "int8")
+
+volco_whisper_model = None
+if VOLCO_WHISPER_PATH:
+    try:
+        print(f"🎧 Loading Volco Whisper from: {VOLCO_WHISPER_PATH}...")
+        volco_whisper_model = WhisperModel(
+            VOLCO_WHISPER_PATH,
+            device=VOLCO_WHISPER_DEVICE,
+            compute_type=VOLCO_WHISPER_COMPUTE,
+            cpu_threads=num_threads,
+            download_root=None,
+        )
+        print("✅ Volco Whisper loaded.")
+    except Exception as e:
+        print(f"⚠️ Failed to load Volco Whisper at {VOLCO_WHISPER_PATH}: {e}")
+        volco_whisper_model = None
 
 # ==========================================
 # 3. LOAD KOKORO TTS WHEN AVAILABLE

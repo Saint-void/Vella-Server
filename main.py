@@ -85,6 +85,17 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     # Add current user prompt
     temp_history.append({"role": "user", "content": req.prompt})
 
+    # Quick-path: if the user prompt is greeting-only, return a short canned reply
+    import re
+    GREETING_RE = re.compile(r"^(hi|hello|hey|greetings|good\s+(morning|afternoon|evening))\b[!,.?\s]*$", re.I)
+    if GREETING_RE.match(req.prompt.strip()):
+        def greeting_gen():
+            yield ""
+            reply = "Hello! How can I assist you today? 😊"
+            yield reply
+        save_message(session_id, user_id, "model", "Hello! How can I assist you today? 😊")
+        return StreamingResponse(greeting_gen(), media_type="text/plain")
+
     # --- CLEANUP: Ensure strict alternation and start with 'user' ---
     chat_history = []
     for msg in temp_history:
