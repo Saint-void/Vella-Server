@@ -29,7 +29,6 @@ router = APIRouter()
 # ⚡ THE FIX: Memory Locks to prevent Python from Garbage Collecting our connections
 active_connections = set()
 active_channels = set()
-user_interrupt_flags = {}
 LOCAL_INTENT_TIMEOUT_SECONDS = 3.0
 
 
@@ -92,8 +91,8 @@ def generate_kokoro_pcm(text: str) -> bytes:
         # Kokoro returns a tuple of (audio_samples_ndarray, sample_rate)
         audio_samples, sample_rate = kokoro_voice.create(
             text=text,
-            voice="af_nova",  
-            speed=1.0,
+            voice="af_aoede",  
+            speed=1.2,
             lang="en-us"
         )
         
@@ -116,12 +115,6 @@ def generate_kokoro_pcm(text: str) -> bytes:
 async def send_pcm_in_chunks(channel, pcm_data, user_id):
     CHUNK_SIZE = 16384
     for i in range(0, len(pcm_data), CHUNK_SIZE):
-
-        # 🛑 STOP IMMEDIATELY
-        if user_interrupt_flags.get(user_id, False):
-            print("🛑 [SERVER] Stopping PCM stream mid-playback.")
-            break
-
         if channel.readyState == "open":
             channel.send(pcm_data[i:i+CHUNK_SIZE])
             await asyncio.sleep(0.02)
@@ -131,8 +124,6 @@ async def send_pcm_in_chunks(channel, pcm_data, user_id):
 # ==========================================
 async def speak_simple_message(text: str, channel, user_id: str):
     """Speaks a message by splitting it into sentences for faster CPU delivery."""
-    # ⚡ Ensure interrupts from previous turns are cleared
-    user_interrupt_flags[user_id] = False
     
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": text})
@@ -144,8 +135,6 @@ async def speak_simple_message(text: str, channel, user_id: str):
     for sentence in sentences:
         if not sentence.strip(): 
             continue
-        if user_interrupt_flags.get(user_id, False): 
-            break
         
         pcm = await asyncio.to_thread(generate_kokoro_pcm, sentence)
         if pcm: 
@@ -157,18 +146,13 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
     buffer = ""
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
     
-    # ⚡ Reset the flag before starting a new response
-    user_interrupt_flags[user_id] = False 
+    
     
     try:
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
         print(f"🤖 Volco: ", end="", flush=True)
         
         async for token in iterate_in_threadpool(stream_generate(prompt)):
-            if user_interrupt_flags.get(user_id, False):
-                print("\n🛑 [SERVER] AI Generation aborted mid-sentence.")
-                break
-                
             buffer += token
             print(token, end="", flush=True)
             
@@ -183,10 +167,10 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
                     if pcm: 
                         await send_pcm_in_chunks(channel, pcm, user_id)
                     
-        # ⚡ Only process the final chunk if we weren't interrupted
-        if buffer.strip() and not user_interrupt_flags.get(user_id, False):
+        # Process the final chunk
+        if buffer.strip():
             pcm = await asyncio.to_thread(generate_kokoro_pcm, buffer)
-            if pcm: 
+            if pcm:
                 await send_pcm_in_chunks(channel, pcm, user_id)
             
         print()
@@ -318,13 +302,7 @@ async def webrtc_offer(request: Request):
                     if not state["is_processing"]:
                         state["is_processing"] = True
                         asyncio.create_task(wrapped_process_commit())
-                # ⚡ NEW: CATCH THE KILL SIGNAL
-                elif message == "INTERRUPT":
-                    print(f"\n🛑 [SERVER] Interrupt received! Killing LLM & TTS for {user_id}...")
-                    user_interrupt_flags[user_id] = True
-                    asyncio.create_task(
-                        volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
-                    )
+                
 
         async def wrapped_process_commit():
             nonlocal audio_buffer

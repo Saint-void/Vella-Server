@@ -10,7 +10,7 @@ The server is built with a modular "Dual-Persona" architecture, allowing two dis
 - **Primary Database:** PostgreSQL (Users, Sessions, Chat History).
 - **Vector Database:** Weaviate (Long-term semantic memory).
 - **LLM Engine:**
-  - **Gemma 3 1B GGUF (Q4_0):** Shared by both personas. 
+  - **Gemma 3 1B GGUF (Q4_0):** Shared by both personas.
   - **Inference Engine:** `llama-cpp-python` (Llama-CPP).
   - **Hardware Acceleration:** **Optimized for Apple Silicon (MPS)** using `n_gpu_layers=-1` to run the entire graph on Metal Performance Shaders.
 - **Voice Stack:**
@@ -20,6 +20,7 @@ The server is built with a modular "Dual-Persona" architecture, allowing two dis
 ## 📂 Directory Structure & Models
 
 The server expects a sibling `models/` folder in the parent directory:
+
 ```
 vella-modes/
 ├── Vella-Server/  (This Repository)
@@ -33,11 +34,13 @@ vella-modes/
 ## 🚀 Building and Running (macOS)
 
 ### Prerequisites
+
 - Python 3.10+
 - PostgreSQL & Weaviate
 - **Piper macOS Binary:** Download the macOS version of Piper and place it in `../models/piper/piper`. Make it executable: `chmod +x ../models/piper/piper`.
 
 ### Installation
+
 ```bash
 # Create and activate virtual environment
 python -m venv .venv
@@ -50,13 +53,16 @@ pip install fastapi uvicorn psycopg2-binary python-dotenv \
 ```
 
 ### Configuration
+
 Create a `.env` file in the root:
+
 ```env
 DATABASE_URL="postgresql://postgres:password@localhost:5432/vella"
 SECRET_KEY="your_secret_key"
 ```
 
 ### Execution
+
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8001
 ```
@@ -67,5 +73,5 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8001
 2. **LLM Interaction:** Use `llm.create_chat_completion(messages=[...], stream=True)` for all AI responses. Do not use `transformers` or manual text templating.
 3. **Streaming:** Always use `StreamingResponse` for LLM outputs in the Web UI. For Volco, use the WebRTC data channel for PCM audio chunks and JSON commands.
 4. **Audio Handling:** Volco uses a "Paced Chunker" (`send_pcm_in_chunks`) to stream raw PCM data over WebRTC to ensure smooth playback on hardware devices.
-5. **Interrupts:** Voice interactions support immediate interruption. When an `INTERRUPT` signal is received, `user_interrupt_flags` are set to kill LLM generation and PCM streaming instantly.
-6. **Database & Memory:** Every interaction (Text or Voice) must be saved to PostgreSQL via `save_message()` and to Weaviate via `add_memory()`.
+
+5. **Database & Memory:** Every interaction (Text or Voice) must be saved to PostgreSQL via `save_message()` and to Weaviate via `add_memory()`.
