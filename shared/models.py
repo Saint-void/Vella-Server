@@ -161,8 +161,8 @@ if VOLCO_WHISPER_PATH:
 KOKORO_MODEL_DIR = os.path.join(BASE_MODELS_PATH, "kokoro")
 KOKORO_ONNX_PATH = os.path.join(KOKORO_MODEL_DIR, "kokoro-v1.0.onnx")
 KOKORO_VOICES_PATH = os.path.join(KOKORO_MODEL_DIR, "voices-v1.0.bin")
-KOKORO_DEFAULT_VOICE = os.getenv("KOKORO_VOICE", "af_nova")
-KOKORO_DEFAULT_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
+KOKORO_DEFAULT_VOICE = os.getenv("KOKORO_VOICE", "af_aoede")
+KOKORO_DEFAULT_SPEED = float(os.getenv("KOKORO_SPEED", "1.3"))
 KOKORO_DEFAULT_LANG = os.getenv("KOKORO_LANG", "en-us")
 
 kokoro_voice = None

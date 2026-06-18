@@ -29,7 +29,6 @@ router = APIRouter()
 # ⚡ THE FIX: Memory Locks to prevent Python from Garbage Collecting our connections
 active_connections = set()
 active_channels = set()
-LOCAL_INTENT_TIMEOUT_SECONDS = 3.0
 
 
 def _action_payload_from_entities(intent: str, entities: dict) -> dict | None:
@@ -50,29 +49,7 @@ def _action_payload_from_entities(intent: str, entities: dict) -> dict | None:
     return None
 
 
-async def _request_local_intent(channel, pending_local_intents: dict, text: str, user_id: str) -> dict:
-    if channel.readyState != "open":
-        return {"intent": "GENERAL_CHAT", "entities": {}, "response": "", "should_call_llm": True}
-
-    request_id = str(uuid.uuid4())
-    loop = asyncio.get_running_loop()
-    future = loop.create_future()
-    pending_local_intents[request_id] = future
-
-    channel.send(json.dumps({
-        "action": "local_intent_request",
-        "request_id": request_id,
-        "text": text,
-        "user_id": user_id,
-    }))
-
-    try:
-        return await asyncio.wait_for(future, timeout=LOCAL_INTENT_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        print("⚠️ [LOCAL INTENT] Volco did not respond in time. Falling back to LLM.")
-        return {"intent": "GENERAL_CHAT", "entities": {}, "response": "", "should_call_llm": True}
-    finally:
-        pending_local_intents.pop(request_id, None)
+# Local device-side intent requests removed. The server will directly use the LLM.
 
 # ==========================================
 # 🗣️ TEXT TO SPEECH (Kokoro ONNX)
@@ -183,7 +160,7 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
 # ==========================================
 # 🧠 THE AI BRAIN 
 # ==========================================
-async def process_voice_commit_text(text: str, channel, user_id: str, session_id: str, pending_local_intents: dict):
+async def process_voice_commit_text(text: str, channel, user_id: str, session_id: str):
     print(f"🗣️ {user_id}: {text}")
 
     if text:
@@ -195,12 +172,13 @@ async def process_voice_commit_text(text: str, channel, user_id: str, session_id
 
         await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
 
-        assistant_result = await _request_local_intent(channel, pending_local_intents, text, user_id)
+        # Local intent/action engine removed: always treat as general chat and call LLM
+        assistant_result = {"intent": "GENERAL_CHAT", "entities": {}, "response": "", "should_call_llm": True}
         intent = assistant_result.get("intent", "GENERAL_CHAT")
         response_text = assistant_result.get("response", "")
         entities = assistant_result.get("entities", {})
         should_call_llm = assistant_result.get("should_call_llm", True)
-        payload = _action_payload_from_entities(intent, entities)
+        payload = None
 
         if not should_call_llm:
             print(f"🧠 Local Intent: {intent} | {response_text}")
@@ -256,7 +234,6 @@ async def webrtc_offer(request: Request):
         # ⚡ Generate a session ID for this voice session
         session_id = str(uuid.uuid4())
         voice_state = VoiceSessionStateMachine()
-        pending_local_intents = {}
         
         # ⚡ Processing state
         state = {
@@ -284,12 +261,7 @@ async def webrtc_offer(request: Request):
                 if message.startswith("{"):
                     try:
                         payload = json.loads(message)
-                        if payload.get("action") == "local_intent_result":
-                            request_id = payload.get("request_id")
-                            future = pending_local_intents.get(request_id)
-                            if future and not future.done():
-                                future.set_result(payload.get("result", {}))
-                            return
+                        # local intent result handling removed
                     except json.JSONDecodeError:
                         pass
 
@@ -323,7 +295,7 @@ async def webrtc_offer(request: Request):
                     return
 
                 voice_state.responding()
-                await process_voice_commit_text(final_text, channel, user_id, session_id, pending_local_intents)
+                await process_voice_commit_text(final_text, channel, user_id, session_id)
                 voice_state.reset_to_idle("response_complete")
             except Exception as e:
                 print(f"❌ [ASR] Commit processing failed: {e}")
