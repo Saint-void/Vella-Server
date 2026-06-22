@@ -5,7 +5,7 @@ from shared.models import llm
 from .constants import VOLCO_SYSTEM_INSTRUCTION
 
 # Default Ollama model for Volco (lightweight conversational)
-OLLAMA_VOLCO_DEFAULT = os.getenv("OLLAMA_VOLCO_DEFAULT_MODEL", "qwen3:1.7b")
+OLLAMA_VOLCO_DEFAULT = os.getenv("OLLAMA_VOLCO_DEFAULT_MODEL", "qwen2.5:1.5b")
 
 
 def stream_generate(prompt: str, model: str | None = None) -> Iterator[str]:
@@ -32,4 +32,4 @@ def stream_generate(prompt: str, model: str | None = None) -> Iterator[str]:
         if "choices" in chunk and len(chunk["choices"]) > 0:
             delta = chunk["choices"][0].get("delta", {})
             if "content" in delta:
-                yield delta["content"]
+                yield delta["content"] # type: ignore

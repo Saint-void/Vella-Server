@@ -5,13 +5,11 @@ from shared.models import llm
 from vella.constants import VELLA_SYSTEM_INSTRUCTION
 
 # Default Ollama model for Vella (high-thinking)
-OLLAMA_VELLA_DEFAULT = os.getenv("OLLAMA_VELLA_DEFAULT_MODEL", "qwen3:8b")
-OLLAMA_VELLA_LOW = os.getenv("OLLAMA_VELLA_LOW_MODEL", "qwen3:1.7b")
+OLLAMA_VELLA_DEFAULT = os.getenv("OLLAMA_VELLA_DEFAULT_MODEL", "qwen2.5:7b")
 
 def stream_generate(messages: List[Dict[str, str]], max_new_tokens: int = 2048, model: str | None = None):
     """
     Generates a response using llama-cpp-python's create_chat_completion.
-    Natively handles the Gemma-3 chat template.
     """
 
     # ⚡ Prepends the system instruction

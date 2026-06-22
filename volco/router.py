@@ -22,6 +22,7 @@ from .db import authenticate_mobile_user
 # Import DB and Memory functions from root
 from db import save_message
 from vector_store import add_memory
+from volco.intent_pipeline import process_text
 
 asr_engine = WhisperASREngine(whisper_model, ASRConfig(sample_rate=16000))
 router = APIRouter()
@@ -29,24 +30,6 @@ router = APIRouter()
 # ⚡ THE FIX: Memory Locks to prevent Python from Garbage Collecting our connections
 active_connections = set()
 active_channels = set()
-
-
-def _action_payload_from_entities(intent: str, entities: dict) -> dict | None:
-    action = entities.get("action")
-    if not action:
-        return None
-
-    if intent == "PLAY_MUSIC":
-        return {"action": action, "query": entities.get("query", "")}
-    if intent == "STOP_MUSIC":
-        return {"action": action, "query": ""}
-    if intent == "SET_VOLUME":
-        return {"action": action, "level": entities.get("level")}
-    if intent == "GET_VOLUME":
-        return {"action": action}
-    if intent == "DEVICE_CONTROL":
-        return {"action": "device_control", "command": action, "device": entities.get("device", "")}
-    return None
 
 
 # Local device-side intent requests removed. The server will directly use the LLM.
@@ -68,8 +51,8 @@ def generate_kokoro_pcm(text: str) -> bytes:
         # Kokoro returns a tuple of (audio_samples_ndarray, sample_rate)
         audio_samples, sample_rate = kokoro_voice.create(
             text=text,
-            voice="af_aoede",  
-            speed=1.2,
+            voice="af_heart",  
+            speed=1.1,
             lang="en-us"
         )
         
@@ -172,32 +155,24 @@ async def process_voice_commit_text(text: str, channel, user_id: str, session_id
 
         await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
 
-        # Local intent/action engine removed: always treat as general chat and call LLM
-        assistant_result = {"intent": "GENERAL_CHAT", "entities": {}, "response": "", "should_call_llm": True}
-        intent = assistant_result.get("intent", "GENERAL_CHAT")
-        response_text = assistant_result.get("response", "")
-        entities = assistant_result.get("entities", {})
-        should_call_llm = assistant_result.get("should_call_llm", True)
-        payload = None
+        assistant_result = await process_text(text)
+        intent = assistant_result.get("intent", "conversation")
+        action = assistant_result.get("action", "call_llm")
+        response_text = assistant_result.get("message", "")
+        payload = assistant_result.get("device_payload")
+        keep_session_open = intent == "conversation" and assistant_result.get("status") == "success"
 
-        if not should_call_llm:
-            print(f"🧠 Local Intent: {intent} | {response_text}")
+        print(f"🧠 Intent: {intent} | Action: {action} | {response_text}")
 
-            if payload and channel.readyState == "open":
-                channel.send(json.dumps(payload))
-                print(f"📡 Sent JSON Command to Headset: {payload}")
-                await asyncio.sleep(0.3)
+        if payload and channel.readyState == "open":
+            channel.send(json.dumps(payload))
+            print(f"📡 Sent JSON Command to Headset: {payload}")
+            await asyncio.sleep(0.3)
 
+        if response_text:
             await speak_simple_message(response_text, channel, user_id)
-
             save_message(session_id, user_id, "model", response_text)
             add_memory(response_text, user_id)
-        else:
-            keep_session_open = True
-            full_ai_response = await stream_audio_response_rtc(text, channel, user_id)
-            if full_ai_response.strip():
-                save_message(session_id, user_id, "model", full_ai_response)
-                add_memory(full_ai_response, user_id)
 
         await asyncio.sleep(0.5)
         if channel.readyState == "open":

@@ -10,9 +10,10 @@ try:
 except ImportError:
     Kokoro = None
 
-# ⚡ CPU OPTIMIZATION: Set threads to avoid resource contention
-num_threads = (os.cpu_count() or 1) // 2 or 1
-torch.set_num_threads(num_threads)
+# ⚡ APPLE SILICON OPTIMIZATION (M4)
+# We let macOS Grand Central Dispatch manage the M4 P-cores and E-cores natively.
+max_threads = os.cpu_count() or 4
+torch.set_num_threads(max_threads)
 
 # Dynamic path resolution
 BASE_MODELS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
@@ -20,7 +21,7 @@ BASE_MODELS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 # ==========================================
 # ⚡ Ollama HTTP Adapter
 # ==========================================
-OLLAMA_DEFAULT = os.getenv("OLLAMA_DEFAULT_MODEL", "qwen3:8b")
+OLLAMA_DEFAULT = os.getenv("OLLAMA_DEFAULT_MODEL", "qwen2.5:1.5b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
@@ -81,7 +82,6 @@ class OllamaLLM:
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
                 continue
-            # `raw` may be bytes or str depending on requests version/config.
             if isinstance(raw, bytes):
                 s = raw.decode("utf-8", errors="replace").strip()
             else:
@@ -108,9 +108,14 @@ class OllamaLLM:
 # Export `llm` for compatibility
 llm = OllamaLLM()
 
+# ==========================================
 # 2. LOAD WHISPER
-WHISPER_PATH = os.path.join(BASE_MODELS_PATH, "models--Systran--faster-whisper-medium.en")
-WHISPER_REQUIRED_FILES = ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt")
+# ==========================================
+WHISPER_PATH = os.path.join(BASE_MODELS_PATH, "models--deepdml--faster-whisper-large-v3-turbo-ct2")
+
+# CHANGED: 'vocabulary.txt' is now 'vocabulary.json'
+WHISPER_REQUIRED_FILES = ("model.bin", "config.json", "tokenizer.json", "vocabulary.json")
+
 missing_whisper_files = [
     filename
     for filename in WHISPER_REQUIRED_FILES
@@ -119,7 +124,7 @@ missing_whisper_files = [
 
 if missing_whisper_files:
     raise FileNotFoundError(
-        "Faster-Whisper medium.en is not fully downloaded. "
+        "Faster-Whisper large-v3-turbo is not fully downloaded. "
         f"Missing {', '.join(missing_whisper_files)} in {WHISPER_PATH}. "
         "Run `Vella-Server/.venv/bin/python Vella/download_stt.py` from /Users/st.void/vella-modes."
     )
@@ -128,13 +133,12 @@ print(f"🎧 Loading Global Whisper from: {WHISPER_PATH}...")
 whisper_model = WhisperModel(
     WHISPER_PATH, 
     device="cpu", 
-    compute_type="int8",
-    cpu_threads=num_threads,
+    compute_type="int8", # Fixed: int8 is natively supported on the Apple Silicon CPU backend
+    cpu_threads=max_threads,
     download_root=None
 )
 
 # Optional: Volco can use a smaller Whisper model for low-latency STT.
-# Set `VOLCO_WHISPER_PATH` to a local model directory or a pretrained name.
 VOLCO_WHISPER_PATH = os.getenv("VOLCO_WHISPER_PATH", "")
 VOLCO_WHISPER_DEVICE = os.getenv("VOLCO_WHISPER_DEVICE", "cpu")
 VOLCO_WHISPER_COMPUTE = os.getenv("VOLCO_WHISPER_COMPUTE", "int8")
@@ -147,7 +151,7 @@ if VOLCO_WHISPER_PATH:
             VOLCO_WHISPER_PATH,
             device=VOLCO_WHISPER_DEVICE,
             compute_type=VOLCO_WHISPER_COMPUTE,
-            cpu_threads=num_threads,
+            cpu_threads=max_threads,
             download_root=None,
         )
         print("✅ Volco Whisper loaded.")
@@ -161,8 +165,8 @@ if VOLCO_WHISPER_PATH:
 KOKORO_MODEL_DIR = os.path.join(BASE_MODELS_PATH, "kokoro")
 KOKORO_ONNX_PATH = os.path.join(KOKORO_MODEL_DIR, "kokoro-v1.0.onnx")
 KOKORO_VOICES_PATH = os.path.join(KOKORO_MODEL_DIR, "voices-v1.0.bin")
-KOKORO_DEFAULT_VOICE = os.getenv("KOKORO_VOICE", "af_aoede")
-KOKORO_DEFAULT_SPEED = float(os.getenv("KOKORO_SPEED", "1.3"))
+KOKORO_DEFAULT_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
+KOKORO_DEFAULT_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
 KOKORO_DEFAULT_LANG = os.getenv("KOKORO_LANG", "en-us")
 
 kokoro_voice = None

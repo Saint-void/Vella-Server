@@ -25,6 +25,7 @@ from auth import router as auth_router
 from vector_store import setup_schema, search_memory, add_memory
 from db import init_db, save_message, get_user_sessions, get_chat_history
 from volco.router import router as volco_router
+from volco.intent_pipeline import router as volco_intent_router
 
 # =============================
 # LIFESPAN MANAGEMENT (Replaces on_event)
@@ -53,6 +54,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(volco_intent_router)
 app.include_router(volco_router)
 
 # =============================
