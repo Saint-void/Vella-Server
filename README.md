@@ -1,183 +1,110 @@
----
+# Vella Server — Backend
 
-# 🧠 Vella & Volco AI Server (Backend)
+> Local backend for the Vella Web UI and the Volco voice device.
+> FastAPI | Ollama (HTTP LLM) | Faster-Whisper STT | Kokoro ONNX TTS (optional) | Piper fallback | PostgreSQL + Weaviate | WebRTC
 
-> **Local Intelligence Engine for Vella Chat & Volco Voice.**
-> *v7.2.0 | FastAPI | PostgreSQL | Kokoro ONNX TTS | Piper TTS Fallback | Llama-CPP (GGUF) | WebRTC*
+The Vella Server is the unified backend that powers the Vella web interface and the Volco edge device. It exposes REST endpoints for chat, STT and TTS plus Volco-specific routers for device sessions and intent handling.
 
-The Vella Server is the local backend that powers both the Vella Web Interface and the Volco Hardware/Voice Assistant.
-- **Llama-CPP Integration:** Migrated from `transformers` to `llama-cpp-python` for native GGUF support.
-- **Apple Silicon (MPS) Native:** Optimized to run the entire LLM graph on Metal performance shaders (`n_gpu_layers=-1`).
-- **Conversational Streaming:** Uses the `create_chat_completion` API for robust, template-free interaction with Gemma 3.
-- **Consolidated Model Loading:** Shared `Llama` instance for Vella and Volco.
+Key runtime behavior:
 
-**New in v7.2.0:**
-- **Kokoro ONNX TTS:** Vella `/tts` now uses Kokoro when available for a more natural voice.
-- **Piper Fallback:** Piper still loads as a fallback and remains available for existing Volco paths.
-- **Configurable Voice:** Set `KOKORO_VOICE`, `KOKORO_SPEED`, and `KOKORO_LANG` in `.env`.
+- The code uses a small Ollama HTTP adapter by default (`shared/models.py`) — set `OLLAMA_BASE_URL` and `OLLAMA_DEFAULT_MODEL` to point at your LLM backend.
+- Faster-Whisper is used for speech-to-text (STT).
+- Kokoro ONNX is used for high-quality TTS when `models/kokoro/` is populated; Piper remains a fallback option when Kokoro isn't available.
+- The app saves chat history to PostgreSQL and optionally uses Weaviate for semantic memory.
 
----
+## Core Technology Stack
 
-## 🛠️ Core Technology Stack
+- API Framework: `FastAPI` (Python 3.10+)
+- LLM: Ollama HTTP adapter (default; configurable via `OLLAMA_BASE_URL` / `OLLAMA_DEFAULT_MODEL`)
+- STT: `faster-whisper` (global Whisper model)
+- TTS: `kokoro-onnx` (optional) with Piper as fallback
+- Real-time: `aiortc` (WebRTC)
+- Persistence: `PostgreSQL` (chat history) and `Weaviate` (vector memory, optional)
 
-- **API Framework:** `FastAPI` (Python 3.10+) running on `Uvicorn`.
-- **Database:** `PostgreSQL` & `Weaviate`.
-- **LLM Engine:** `Gemma 3 4B (GGUF Q4_K_M)` running via `llama-cpp-python` with **Full MPS (Metal) Acceleration**.
-- **Voice Engine:**
-  - **STT:** `Faster-Whisper medium.en` (running on optimized CPU int8 for Mac).
-- **Real-Time Comm:** `WebRTC` (aiortc).
+## Quick Start (macOS / Linux)
 
----
+### 1) Prerequisites
 
-## 🚀 Quick Start Guide (macOS)
+- Python 3.10+
+- Ollama (optional but recommended for local LLM hosting) — see https://ollama.com for install instructions
+- PostgreSQL & Weaviate (optional, required for persistence and semantic memory)
+- FFmpeg (`brew install ffmpeg` on macOS)
 
-### 1. Prerequisites
+### 2) Create a virtualenv and install Python deps
 
-- **Python 3.10+**
-- **PostgreSQL & Weaviate** installed and running.
-- **FFmpeg** installed (`brew install ffmpeg`).
-- **Kokoro ONNX model files:** Place in `../models/kokoro/`.
-- **Piper macOS Binary:** Place in `../models/piper/piper` and `chmod +x` for fallback/Volco compatibility.
-
-### 2. Installation
+Note: installing `torch` can require platform-specific wheels. Adjust the command for your platform.
 
 ```bash
-# Create Virtual Environment
 python -m venv .venv
 source .venv/bin/activate
-
-# Install Dependencies
-pip install fastapi uvicorn psycopg2-binary python-dotenv \
-            llama-cpp-python faster-whisper weaviate-client \
-            sentence-transformers aiortc numpy huggingface_hub \
-            kokoro-onnx soundfile
+pip install fastapi uvicorn python-dotenv requests faster-whisper weaviate-client sentence-transformers aiortc numpy soundfile torch
+# Optional: pip install kokoro-onnx piper
 ```
 
-### 3. Kokoro TTS Setup
+### 3) Models
 
-Create the Kokoro model folder:
+- Place model folders under the repository `models/` directory. Examples used by the codebase:
+  - `models/models--deepdml--faster-whisper-large-v3-turbo-ct2/` (Whisper)
+  - `models/kokoro/` with `kokoro-v1.0.onnx` and `voices-v1.0.bin` (Kokoro TTS)
+  - `models/piper/` for a Piper binary (fallback TTS)
+
+Kokoro example (download into `models/kokoro`):
 
 ```bash
-mkdir -p ../models/kokoro
+mkdir -p models/kokoro
+curl -L -o models/kokoro/kokoro-v1.0.onnx \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+curl -L -o models/kokoro/voices-v1.0.bin \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 ```
 
-Download the Kokoro ONNX model and voice bundle:
+### 4) Configuration
+
+- Copy or create `Vella-Server/.env` for local environment variables. Important variables:
+  - `OLLAMA_BASE_URL` — URL for the Ollama HTTP server (e.g. `http://127.0.0.1:11434`)
+  - `OLLAMA_DEFAULT_MODEL` — default model name used by the adapter
+  - `KOKORO_VOICE`, `KOKORO_SPEED`, `KOKORO_LANG` — optional TTS settings
+
+### 5) Start the server
+
+Use the provided helper script which will activate the `Vella-Server/.venv` if present and optionally start Ollama when a local `ollama` binary is available on `PATH`:
 
 ```bash
-curl -L https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx \
-  -o ../models/kokoro/kokoro-v1.0.onnx
+# foreground
+./scripts/start_vella.sh
 
-curl -L https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin \
-  -o ../models/kokoro/voices-v1.0.bin
-```
+# background
+./scripts/start_vella.sh --daemon
 
-Optional `.env` settings:
-
-```env
-KOKORO_VOICE=af_sarah
-KOKORO_SPEED=1.0
-KOKORO_LANG=en-us
-```
-
-`KOKORO_SPEED` is clamped between `0.5` and `2.0`.
-
-### 4. Kokoro Voices
-
-Recommended voices to try first:
-
-```text
-af_sarah
-af_bella
-af_nova
-af_sky
-am_echo
-am_liam
-bf_emma
-bm_daniel
-```
-
-Installed voice bundle:
-
-```text
-af_alloy
-af_aoede
-af_bella
-af_heart
-af_jessica
-af_kore
-af_nicole
-af_nova
-af_river
-af_sarah
-af_sky
-am_adam
-am_echo
-am_eric
-am_fenrir
-am_liam
-am_michael
-am_onyx
-am_puck
-am_santa
-bf_alice
-bf_emma
-bf_isabella
-bf_lily
-bm_daniel
-bm_fable
-bm_george
-bm_lewis
-ef_dora
-em_alex
-em_santa
-ff_siwis
-hf_alpha
-hf_beta
-hm_omega
-hm_psi
-if_sara
-im_nicola
-jf_alpha
-jf_gongitsune
-jf_nezumi
-jf_tebukuro
-jm_kumo
-pf_dora
-pm_alex
-pm_santa
-zf_xiaobei
-zf_xiaoni
-zf_xiaoxiao
-zf_xiaoyi
-zm_yunjian
-zm_yunxi
-zm_yunxia
-zm_yunyang
-```
-
-### 5. Start the Server
-
-```bash
+# or run directly (with venv activated)
 uvicorn main:app --reload --host 0.0.0.0 --port 8001
-scripts/start_vella.sh --daemon
 ```
 
----
+The `start_vella.sh` script will try to start Ollama on port `11434` if it's not already running and the `ollama` binary is available on `PATH`.
 
-## 📂 Project Structure
+## Project Structure (overview)
 
-```text
+```
 vella-modes/
-├── Vella-Server/          # Backend Application (This Repository)
-└── models/                # Shared Model Storage
-    ├── gemma-3-4b-it-gguf/
+├── Vella-Server/          # Backend application (this folder)
+└── models/                # Shared model storage used by server and Volco
+    ├── models--deepdml--faster-whisper-large-v3-turbo-ct2/
     ├── models--Systran--faster-whisper-medium.en/
     ├── kokoro/
     │   ├── kokoro-v1.0.onnx
     │   └── voices-v1.0.bin
-    └── piper/             # Piper fallback voice model and binary
+    └── piper/             # Piper fallback voice model and optional binary
 ```
+
+## Notes
+
+- The codebase includes an Ollama-compatible adapter so you can use an Ollama HTTP backend or swap in another compatible service.
+- If you intend to run entirely on-device (llama-cpp / GGUF), the code can be adapted, but the default provided adapter expects an Ollama-style HTTP API.
+
+## Contributing
+
+- Open issues or PRs for documentation and feature updates. Run tests under `Vella-Server/tests/` and verify hardware-specific changes on target devices.
 
 ---
 
-**Developed by Void Tech.** _Private, Local, Intelligent._
+Developed by Void Tech. Private, local, intelligent.

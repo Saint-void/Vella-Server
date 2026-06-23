@@ -47,53 +47,58 @@ class IntentClassifier:
     def _build_prompt(self, text: str) -> str:
         return f"""You are Vella's intent classifier.
 
-Return ONLY valid JSON.
-Do not use markdown.
-Do not explain your answer.
-Do not include extra text before or after the JSON.
+    Return ONLY valid JSON.
+    Do not use markdown.
+    Do not explain your answer.
+    Do not include extra text before or after the JSON.
 
-Supported intents:
-1. spotify_play
-2. spotify_play_playlist
-3. spotify_play_album
-4. spotify_next
-5. spotify_previous
-6. spotify_resume
-7. conversation
+    Supported intents:
+    1. spotify_play
+    2. spotify_play_playlist
+    3. spotify_play_album
+    4. spotify_next
+    5. spotify_previous
+    6. spotify_resume
+    7. spotify_pause
+    8. conversation
 
-Schemas:
-- spotify_play: {{"intent":"spotify_play","action":"spotify_play","song":"<song>","artist":"<artist or null>"}}
-- spotify_play_playlist: {{"intent":"spotify_play_playlist","action":"spotify_play_playlist","playlist":"<playlist name>"}}
-- spotify_play_album: {{"intent":"spotify_play_album","action":"spotify_play_album","album":"<album name>"}}
-- spotify_next: {{"intent":"spotify_next","action":"spotify_next"}}
-- spotify_previous: {{"intent":"spotify_previous","action":"spotify_previous"}}
-- spotify_resume: {{"intent":"spotify_resume","action":"spotify_resume"}}
-- conversation: {{"intent":"conversation","action":"call_llm","text":"<original user text>"}}
+    Schemas:
+    - spotify_play: {{"intent":"spotify_play","action":"spotify_play","song":"<song>","artist":"<artist or null>"}}
+    - spotify_play_playlist: {{"intent":"spotify_play_playlist","action":"spotify_play_playlist","playlist":"<playlist name>"}}
+    - spotify_play_album: {{"intent":"spotify_play_album","action":"spotify_play_album","album":"<album name>"}}
+    - spotify_next: {{"intent":"spotify_next","action":"spotify_next"}}
+    - spotify_previous: {{"intent":"spotify_previous","action":"spotify_previous"}}
+    - spotify_resume: {{"intent":"spotify_resume","action":"spotify_resume"}}
+    - spotify_pause: {{"intent":"spotify_pause","action":"spotify_pause"}}
+    - conversation: {{"intent":"conversation","action":"call_llm","text":"<original user text>"}}
 
-Examples:
-User: Play Hope by NF
-JSON: {{"intent":"spotify_play","action":"spotify_play","song":"Hope","artist":"NF"}}
+    Examples:
+    User: Play Hope by NF
+    JSON: {{"intent":"spotify_play","action":"spotify_play","song":"Hope","artist":"NF"}}
 
-User: Play my NF playlist
-JSON: {{"intent":"spotify_play_playlist","action":"spotify_play_playlist","playlist":"NF"}}
+    User: Play my NF playlist
+    JSON: {{"intent":"spotify_play_playlist","action":"spotify_play_playlist","playlist":"NF"}}
 
-User: Play the Fear album
-JSON: {{"intent":"spotify_play_album","action":"spotify_play_album","album":"Fear"}}
+    User: Play the Fear album
+    JSON: {{"intent":"spotify_play_album","action":"spotify_play_album","album":"Fear"}}
 
-User: Next song
-JSON: {{"intent":"spotify_next","action":"spotify_next"}}
+    User: Next song
+    JSON: {{"intent":"spotify_next","action":"spotify_next"}}
 
-User: Previous track
-JSON: {{"intent":"spotify_previous","action":"spotify_previous"}}
+    User: Previous track
+    JSON: {{"intent":"spotify_previous","action":"spotify_previous"}}
 
-User: Resume song
-JSON: {{"intent":"spotify_resume","action":"spotify_resume"}}
+    User: Resume song
+    JSON: {{"intent":"spotify_resume","action":"spotify_resume"}}
 
-User: Play music
-JSON: {{"intent":"spotify_resume","action":"spotify_resume"}}
+    User: Play music
+    JSON: {{"intent":"spotify_resume","action":"spotify_resume"}}
 
-User: How are you doing?
-JSON: {{"intent":"conversation","action":"call_llm","text":"How are you doing?"}}
+    User: Pause the music
+    JSON: {{"intent":"spotify_pause","action":"spotify_pause"}}
 
-User: {text}
-JSON:"""
+    User: How are you doing?
+    JSON: {{"intent":"conversation","action":"call_llm","text":"How are you doing?"}}
+
+    User: {text}
+    JSON:"""

@@ -40,6 +40,10 @@ async def _spotify_resume(_: dict[str, Any]) -> dict[str, Any]:
     return await spotify.resume()
 
 
+async def _spotify_pause(_: dict[str, Any]) -> dict[str, Any]:
+    return await spotify.pause()
+
+
 async def _conversation(intent_data: dict[str, Any]) -> dict[str, Any]:
     return await chat.handle(intent_data.get("text", ""))
 
@@ -55,6 +59,7 @@ class IntentRouter:
             "spotify_next": _spotify_next,
             "spotify_previous": _spotify_previous,
             "spotify_resume": _spotify_resume,
+            "spotify_pause": _spotify_pause,
             "conversation": _conversation,
         }
 

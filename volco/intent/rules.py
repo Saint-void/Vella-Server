@@ -22,6 +22,10 @@ _RESUME_COMMAND = re.compile(
     r"\b(?:resume|continue|unpause)(?:\s+(?:song|track|music|playback))?\b",
     flags=re.IGNORECASE,
 )
+_PAUSE_COMMAND = re.compile(
+    r"\b(?:pause|stop|hold|mute|hang on|wait a sec|wait)\b(?:\s+(?:music|song|track|playback|audio))?",
+    flags=re.IGNORECASE,
+)
 _VAGUE_PLAY_QUERIES = {
     "a song",
     "music",
@@ -48,7 +52,8 @@ def detect_intent(text: str) -> dict[str, Any] | None:
 
     if _RESUME_COMMAND.search(clean_text):
         return {"intent": "spotify_resume", "action": "spotify_resume"}
-
+    if _PAUSE_COMMAND.search(clean_text):
+        return {"intent": "spotify_pause", "action": "spotify_pause"}
     match = _PLAY_COMMAND.search(clean_text)
     if not match:
         return None

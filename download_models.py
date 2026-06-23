@@ -90,7 +90,7 @@ def download_kokoro(models_dir: Path, dry_run: bool = True):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Download Whisper (faster-whisper) models and Kokoro assets")
-    p.add_argument("--models", choices=("base", "medium", "turbo", "all"), default="all",
+    p.add_argument("--models", choices=("base", "medium", "turbo", "small", "all"), default="all",
                    help="Which Whisper models to download")
     p.add_argument("--no-kokoro", action="store_true", help="Skip downloading Kokoro files")
     p.add_argument("--dry-run", action="store_true", help="Show what would be downloaded (default)")
@@ -112,6 +112,7 @@ def main():
     do_base = args.models in ("base", "all")
     do_medium = args.models in ("medium", "all")
     do_turbo = args.models in ("turbo", "all")
+    do_small = args.models in ("small", "all")
 
     any_fail = False
 
@@ -120,6 +121,8 @@ def main():
             download_whisper("base.en", models_dir / "models--Systran--faster-whisper-base.en", dry_run=args.dry_run)
         if do_medium:
             download_whisper("medium.en", models_dir / "models--Systran--faster-whisper-medium.en", dry_run=args.dry_run)
+        if do_small:
+            download_whisper("small.en", models_dir / "models--Systran--faster-whisper-small.en", dry_run=args.dry_run)
         if do_turbo:
             download_whisper("deepdml/faster-whisper-large-v3-turbo-ct2", models_dir / "models--deepdml--faster-whisper-large-v3-turbo-ct2", dry_run=args.dry_run)
     except Exception as e:
