@@ -2,7 +2,9 @@ import re
 import asyncio
 import json
 import uuid
+import io
 import numpy as np
+import soundfile as sf
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -17,7 +19,7 @@ from volco.connection import volco_manager
 from volco.agent import stream_generate
 from volco.asr_engine import ASRConfig, WhisperASREngine
 from volco.state_machine import VoiceSessionStateMachine, log_voice_event
-from .db import authenticate_mobile_user  
+from .db import authenticate_mobile_user
 
 # Import DB and Memory functions from root
 from db import save_message
@@ -27,18 +29,20 @@ from volco.intent_pipeline import process_text
 asr_engine = WhisperASREngine(whisper_model, ASRConfig(sample_rate=16000))
 router = APIRouter()
 
-# ⚡ THE FIX: Memory Locks to prevent Python from Garbage Collecting our connections
+# ⚡ Memory Locks to prevent Python from Garbage Collecting our connections
 active_connections = set()
 active_channels = set()
 
 
-# Local device-side intent requests removed. The server will directly use the LLM.
-
 # ==========================================
-# 🗣️ TEXT TO SPEECH (Kokoro ONNX)
+# 🗣️ TEXT TO SPEECH (Kokoro ONNX → WAV)
 # ==========================================
-def generate_kokoro_pcm(text: str) -> bytes:
-    """Generates 24kHz 16-bit Mono PCM audio using Kokoro ONNX."""
+def generate_kokoro_wav(text: str) -> bytes:
+    """
+    Synthesizes speech with Kokoro ONNX and returns a complete WAV file as bytes.
+    The WAV starts with the standard RIFF header so the device can detect and
+    play it directly without any extra framing.
+    """
     text = text.strip()
     if not text:
         return b""
@@ -48,100 +52,108 @@ def generate_kokoro_pcm(text: str) -> bytes:
         return b""
 
     try:
-        # Kokoro returns a tuple of (audio_samples_ndarray, sample_rate)
         audio_samples, sample_rate = kokoro_voice.create(
             text=text,
-            voice="af_heart",  
+            voice="af_heart",
             speed=1.1,
             lang="en-us"
         )
-        
+
         if audio_samples is None or len(audio_samples) == 0:
             print("⚠️ [TTS WARNING] Kokoro returned no audio.")
             return b""
 
-        # Clamp float32 outputs safely between -1.0 and 1.0 before scaling
+        # Clamp float32 outputs safely before conversion
         audio_samples = np.clip(audio_samples, -1.0, 1.0)
-        
-        # Convert float32 array to 16-bit Signed Integer PCM bytes
-        pcm_16 = (audio_samples * 32767).astype(np.int16)
-        return pcm_16.tobytes()
 
-    except Exception as e: 
-        print(f"❌ [TTS ERROR] Native Kokoro synthesis failure: {e}")
+        # Write into an in-memory WAV (RIFF header + PCM_16 body)
+        wav_io = io.BytesIO()
+        sf.write(wav_io, audio_samples, sample_rate, format="WAV", subtype="PCM_16")
+        wav_io.seek(0)
+        return wav_io.read()
+
+    except Exception as e:
+        print(f"❌ [TTS ERROR] Kokoro WAV synthesis failure: {e}")
         return b""
 
-# ⚡ THE FIX: THE PACED CHUNKER
-async def send_pcm_in_chunks(channel, pcm_data, user_id):
-    CHUNK_SIZE = 16384
-    for i in range(0, len(pcm_data), CHUNK_SIZE):
-        if channel.readyState == "open":
-            channel.send(pcm_data[i:i+CHUNK_SIZE])
-            await asyncio.sleep(0.02)
+
+async def send_wav(channel, wav_data: bytes) -> None:
+    """
+    Send a complete WAV file as a single binary message over the WebRTC data channel.
+    Each call is one self-contained WAV — the device detects the RIFF header and
+    plays it immediately. WebRTC's SCTP layer handles fragmentation transparently.
+    """
+    if wav_data and channel.readyState == "open":
+        channel.send(wav_data)
+        await asyncio.sleep(0.01)  # Brief yield to the event loop
+
 
 # ==========================================
-# 🔄 STREAMING LOGIC
+# 🔄 TTS HELPERS
 # ==========================================
-async def speak_simple_message(text: str, channel, user_id: str):
-    """Speaks a message by splitting it into sentences for faster CPU delivery."""
-    
+async def speak_simple_message(text: str, channel, user_id: str) -> None:
+    """
+    Synthesize a complete short response as a single WAV and send it.
+    Used for all intent action confirmations (Spotify, etc.).
+    """
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": text})
-    
-    # ⚡ SPLIT INTO SENTENCES: Faster than generating the whole block on CPU
-    sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
-    sentences = sentence_endings.split(text)
-    
-    for sentence in sentences:
-        if not sentence.strip(): 
-            continue
-        
-        pcm = await asyncio.to_thread(generate_kokoro_pcm, sentence)
-        if pcm: 
-            await send_pcm_in_chunks(channel, pcm, user_id) 
-        
+
+    wav = await asyncio.to_thread(generate_kokoro_wav, text)
+    if wav:
+        await send_wav(channel, wav)
+
     await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
 
+
 async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
+    """
+    Stream LLM tokens and send one WAV per completed sentence over the data channel.
+    The device queues the WAVs and plays them back-to-back for smooth speech.
+    Returns the full response text.
+    """
     buffer = ""
+    full_response = ""
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
-    
-    
-    
+
     try:
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
         print(f"🤖 Volco: ", end="", flush=True)
-        
+
         async for token in iterate_in_threadpool(stream_generate(prompt)):
             buffer += token
+            full_response += token
             print(token, end="", flush=True)
-            
+
             await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": token})
+
             parts = sentence_endings.split(buffer)
             if len(parts) > 1:
-                sentence = parts[0]
-                buffer = parts[1]
-                if sentence.strip():
-                    # Process Kokoro TTS for this sentence
-                    pcm = await asyncio.to_thread(generate_kokoro_pcm, sentence)
-                    if pcm: 
-                        await send_pcm_in_chunks(channel, pcm, user_id)
-                    
-        # Process the final chunk
+                # Send every complete sentence as its own WAV
+                for sentence in parts[:-1]:
+                    if sentence.strip():
+                        wav = await asyncio.to_thread(generate_kokoro_wav, sentence)
+                        if wav:
+                            await send_wav(channel, wav)
+                buffer = parts[-1]  # Keep the incomplete trailing fragment
+
+        # Send whatever remains after the stream closes
         if buffer.strip():
-            pcm = await asyncio.to_thread(generate_kokoro_pcm, buffer)
-            if pcm:
-                await send_pcm_in_chunks(channel, pcm, user_id)
-            
+            wav = await asyncio.to_thread(generate_kokoro_wav, buffer)
+            if wav:
+                await send_wav(channel, wav)
+
         print()
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
-        return buffer
-    except Exception as e: 
-        print(f"\n❌ Stream Error: {repr(e)}") 
+        return full_response
+
+    except Exception as e:
+        print(f"\n❌ Stream Error: {repr(e)}")
         return ""
 
+
 # ==========================================
-# 🧠 THE AI BRAIN 
+# 🧠 THE AI BRAIN
 # ==========================================
 async def process_voice_commit_text(text: str, channel, user_id: str, session_id: str):
     print(f"🗣️ {user_id}: {text}")
@@ -186,6 +198,7 @@ async def process_voice_commit_text(text: str, channel, user_id: str, session_id
         if channel.readyState == "open":
             channel.send("NO_SPEECH")
 
+
 # ==========================================
 # 🔌 WEBRTC SIGNALING ENDPOINT
 # ==========================================
@@ -193,7 +206,7 @@ async def process_voice_commit_text(text: str, channel, user_id: str, session_id
 async def webrtc_offer(request: Request):
     params = await request.json()
     user_id = params.get("user_id", "sogolo")
-    
+
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
     pc = RTCPeerConnection()
     active_connections.add(pc)
@@ -201,16 +214,14 @@ async def webrtc_offer(request: Request):
 
     @pc.on("datachannel")
     def on_datachannel(channel):
-        active_channels.add(channel) 
-        
+        active_channels.add(channel)
+
         print(f"⚡ [WEBRTC] UDP Channel '{channel.label}' opened for {user_id}")
         audio_buffer = bytearray()
-        
-        # ⚡ Generate a session ID for this voice session
+
         session_id = str(uuid.uuid4())
         voice_state = VoiceSessionStateMachine()
-        
-        # ⚡ Processing state
+
         state = {
             "is_processing": False,
             "is_running": True
@@ -222,7 +233,7 @@ async def webrtc_offer(request: Request):
         @channel.on("message")
         def on_message(message):
             nonlocal audio_buffer
-            
+
             if isinstance(message, bytes):
                 if state["is_processing"]:
                     log_voice_event("noise_filtered", reason="audio_received_while_processing", bytes=len(message))
@@ -231,17 +242,16 @@ async def webrtc_offer(request: Request):
                     voice_state.wake_word_detected()
                     voice_state.start_listening()
                 audio_buffer.extend(message)
-                
+
             elif isinstance(message, str):
                 if message.startswith("{"):
                     try:
-                        payload = json.loads(message)
-                        # local intent result handling removed
+                        json.loads(message)
                     except json.JSONDecodeError:
                         pass
 
-                if message == "PING": 
-                    pass 
+                if message == "PING":
+                    pass
                 elif message == "CLEAR":
                     audio_buffer = bytearray()
                     voice_state.reset_to_idle("client_clear")
@@ -249,7 +259,6 @@ async def webrtc_offer(request: Request):
                     if not state["is_processing"]:
                         state["is_processing"] = True
                         asyncio.create_task(wrapped_process_commit())
-                
 
         async def wrapped_process_commit():
             nonlocal audio_buffer
@@ -280,7 +289,7 @@ async def webrtc_offer(request: Request):
             finally:
                 state["is_processing"] = False
 
-    @pc.on("connectionstatechange") 
+    @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         print(f"📶 [WEBRTC] Connection state: {pc.connectionState}")
         if pc.connectionState in ["failed", "closed"]:
@@ -303,12 +312,14 @@ async def webrtc_offer(request: Request):
         {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
     )
 
+
 # ==========================================
 # 🔐 MOBILE APP API ENDPOINTS
 # ==========================================
 class LoginRequest(BaseModel):
     email: str
     password: str
+
 
 @router.post("/api/volco/login")
 def mobile_login(request: LoginRequest):

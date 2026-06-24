@@ -133,7 +133,7 @@ llm = OllamaLLM()
 #   VOLCO_WHISPER_MLX_REPO — Volco STT model (default: tiny.en for low latency)
 
 WHISPER_MLX_REPO = os.getenv("WHISPER_MLX_REPO", "mlx-community/whisper-medium.en-mlx")
-VOLCO_WHISPER_MLX_REPO = os.getenv("VOLCO_WHISPER_MLX_REPO", "mlx-community/whisper-tiny.en-mlx")
+VOLCO_WHISPER_MLX_REPO = os.getenv("VOLCO_WHISPER_MLX_REPO", "mlx-community/whisper-small.en-mlx")
 
 
 class MLXWhisperModel:
@@ -152,6 +152,11 @@ class MLXWhisperModel:
         print(f"🎧 MLX Whisper ready — model: {repo} (GPU/Neural Engine)")
 
     def transcribe(self, audio, language: str = "en", **kwargs):
+        # Strip faster-whisper-only kwargs that mlx_whisper doesn't support
+        kwargs.pop("vad_filter", None)
+        kwargs.pop("vad_parameters", None)
+        kwargs.pop("beam_size", None)
+
         result = mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=self.repo,
