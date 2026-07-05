@@ -3,6 +3,7 @@ import asyncio
 import json
 import uuid
 import io
+import os
 import numpy as np
 import soundfile as sf
 from fastapi import APIRouter, Request, HTTPException
@@ -19,12 +20,14 @@ from volco.connection import volco_manager
 from volco.agent import stream_generate
 from volco.asr_engine import ASRConfig, WhisperASREngine
 from volco.state_machine import VoiceSessionStateMachine, log_voice_event
+from volco.intent.classifier import IntentClassifier
+from volco.intent.router import IntentRouter
+from volco.actions.chat import CHAT_MODEL
 from .db import authenticate_mobile_user
 
 # Import DB and Memory functions from root
 from db import save_message
 from vector_store import add_memory
-from volco.intent_pipeline import process_text
 
 asr_engine = WhisperASREngine(whisper_model, ASRConfig(sample_rate=16000))
 router = APIRouter()
@@ -32,6 +35,13 @@ router = APIRouter()
 # ⚡ Memory Locks to prevent Python from Garbage Collecting our connections
 active_connections = set()
 active_channels = set()
+
+
+def get_tts_concurrency() -> int:
+    try:
+        return max(1, int(os.getenv("VOLCO_TTS_CONCURRENCY", "2")))
+    except ValueError:
+        return 2
 
 
 # ==========================================
@@ -68,6 +78,8 @@ def generate_kokoro_wav(text: str) -> bytes:
 
         # Write into an in-memory WAV (RIFF header + PCM_16 body)
         wav_io = io.BytesIO()
+        if len(audio_samples.shape) > 1:
+            audio_samples = audio_samples.mean(axis=1)
         sf.write(wav_io, audio_samples, sample_rate, format="WAV", subtype="PCM_16")
         wav_io.seek(0)
         return wav_io.read()
@@ -108,22 +120,78 @@ async def speak_simple_message(text: str, channel, user_id: str) -> None:
 
 async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
     """
-    Stream LLM tokens and send one WAV per completed sentence over the data channel.
+    Stream LLM tokens while completed sentences are prepared as WAVs.
     The device queues the WAVs and plays them back-to-back for smooth speech.
     Returns the full response text.
     """
     buffer = ""
     full_response = ""
     sentence_endings = re.compile(r'(?<=[.!?¡¿,;])\s+')
+    tts_semaphore = asyncio.Semaphore(get_tts_concurrency())
+    tts_tasks: dict[int, asyncio.Task[bytes]] = {}
+    tts_condition = asyncio.Condition()
+    next_sentence_index = 0
+    next_send_index = 0
+    llm_done = False
+
+    async def synthesize_sentence(sentence: str, index: int) -> bytes:
+        async with tts_semaphore:
+            try:
+                wav = await asyncio.to_thread(generate_kokoro_wav, sentence)
+                if wav:
+                    print(f"🔊 [TTS] WAV ready #{index}", flush=True)
+                return wav
+            except Exception as e:
+                print(f"❌ [TTS STREAM ERROR] sentence #{index}: {e}")
+                return b""
+
+    async def enqueue_sentence(sentence: str) -> None:
+        nonlocal next_sentence_index
+
+        sentence = sentence.strip()
+        if not sentence:
+            return
+
+        async with tts_condition:
+            index = next_sentence_index
+            next_sentence_index += 1
+            tts_tasks[index] = asyncio.create_task(synthesize_sentence(sentence, index))
+            tts_condition.notify_all()
+
+    async def send_ready_wavs_in_order() -> None:
+        nonlocal next_send_index
+
+        while True:
+            async with tts_condition:
+                await tts_condition.wait_for(
+                    lambda: next_send_index in tts_tasks or (llm_done and next_send_index >= next_sentence_index)
+                )
+                if llm_done and next_send_index >= next_sentence_index:
+                    return
+
+                index = next_send_index
+                task = tts_tasks[index]
+
+            wav = await task
+            if wav:
+                await send_wav(channel, wav)
+                # print(f"📤 [TTS] Sent WAV #{index} to Volco", flush=True)
+
+            async with tts_condition:
+                tts_tasks.pop(index, None)
+                next_send_index += 1
+                tts_condition.notify_all()
+
+    sender_task = asyncio.create_task(send_ready_wavs_in_order())
 
     try:
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_start", "content": ""})
-        print(f"🤖 Volco: ", end="", flush=True)
+        # print(f"🤖 Volco: ", end="", flush=True)
 
-        async for token in iterate_in_threadpool(stream_generate(prompt)):
+        async for token in iterate_in_threadpool(stream_generate(prompt, model=CHAT_MODEL)):
             buffer += token
             full_response += token
-            print(token, end="", flush=True)
+            # print(token, end="", flush=True)
 
             await volco_manager.broadcast_to_app(user_id, {"role": "ai_token", "content": token})
 
@@ -131,17 +199,18 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
             if len(parts) > 1:
                 # Send every complete sentence as its own WAV
                 for sentence in parts[:-1]:
-                    if sentence.strip():
-                        wav = await asyncio.to_thread(generate_kokoro_wav, sentence)
-                        if wav:
-                            await send_wav(channel, wav)
+                    await enqueue_sentence(sentence)
                 buffer = parts[-1]  # Keep the incomplete trailing fragment
 
         # Send whatever remains after the stream closes
         if buffer.strip():
-            wav = await asyncio.to_thread(generate_kokoro_wav, buffer)
-            if wav:
-                await send_wav(channel, wav)
+            await enqueue_sentence(buffer)
+
+        async with tts_condition:
+            llm_done = True
+            tts_condition.notify_all()
+
+        await sender_task
 
         print()
         await volco_manager.broadcast_to_app(user_id, {"role": "ai_end", "content": ""})
@@ -149,6 +218,14 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
 
     except Exception as e:
         print(f"\n❌ Stream Error: {repr(e)}")
+        for task in tts_tasks.values():
+            task.cancel()
+        if not sender_task.done():
+            sender_task.cancel()
+            try:
+                await sender_task
+            except asyncio.CancelledError:
+                pass
         return ""
 
 
@@ -156,7 +233,7 @@ async def stream_audio_response_rtc(prompt: str, channel, user_id: str) -> str:
 # 🧠 THE AI BRAIN
 # ==========================================
 async def process_voice_commit_text(text: str, channel, user_id: str, session_id: str):
-    print(f"🗣️ {user_id}: {text}")
+    # print(f"🗣️ {user_id}: {text}")
 
     if text:
         keep_session_open = False
@@ -167,24 +244,38 @@ async def process_voice_commit_text(text: str, channel, user_id: str, session_id
 
         await volco_manager.broadcast_to_app(user_id, {"role": "user", "content": text})
 
-        assistant_result = await process_text(text)
-        intent = assistant_result.get("intent", "conversation")
-        action = assistant_result.get("action", "call_llm")
-        response_text = assistant_result.get("message", "")
-        payload = assistant_result.get("device_payload")
-        keep_session_open = intent == "conversation" and assistant_result.get("status") == "success"
+        classifier = IntentClassifier()
+        intent_data = await classifier.classify(text)
+        intent = intent_data.get("intent", "conversation")
+        action = intent_data.get("action", "call_llm")
 
-        print(f"🧠 Intent: {intent} | Action: {action} | {response_text}")
+        # print(f"🧠 Intent: {intent} | Action: {action}")
 
-        if payload and channel.readyState == "open":
-            channel.send(json.dumps(payload))
-            print(f"📡 Sent JSON Command to Headset: {payload}")
-            await asyncio.sleep(0.3)
+        if intent == "conversation" and action == "call_llm":
+            response_text = await stream_audio_response_rtc(intent_data.get("text", text), channel, user_id)
+            keep_session_open = bool(response_text.strip())
 
-        if response_text:
-            await speak_simple_message(response_text, channel, user_id)
-            save_message(session_id, user_id, "model", response_text)
-            add_memory(response_text, user_id)
+            if response_text:
+                save_message(session_id, user_id, "model", response_text)
+                add_memory(response_text, user_id)
+        else:
+            intent_router = IntentRouter()
+            assistant_result = await intent_router.route(intent_data)
+            response_text = assistant_result.get("message", "")
+            payload = assistant_result.get("device_payload")
+            keep_session_open = False
+
+            # print(f"🧠 Action Result: {response_text}")
+
+            if payload and channel.readyState == "open":
+                channel.send(json.dumps(payload))
+                # print(f"📡 Sent JSON Command to Headset: {payload}")
+                await asyncio.sleep(0.3)
+
+            if response_text:
+                await speak_simple_message(response_text, channel, user_id)
+                save_message(session_id, user_id, "model", response_text)
+                add_memory(response_text, user_id)
 
         await asyncio.sleep(0.5)
         if channel.readyState == "open":
@@ -216,7 +307,7 @@ async def webrtc_offer(request: Request):
     def on_datachannel(channel):
         active_channels.add(channel)
 
-        print(f"⚡ [WEBRTC] UDP Channel '{channel.label}' opened for {user_id}")
+        # print(f"⚡ [WEBRTC] UDP Channel '{channel.label}' opened for {user_id}")
         audio_buffer = bytearray()
 
         session_id = str(uuid.uuid4())
@@ -272,7 +363,7 @@ async def webrtc_offer(request: Request):
                 final_text = final_text.strip()
 
                 if not final_text:
-                    print("🔇 [COMMIT] Ignored empty/no-speech commit.")
+                    # print("🔇 [COMMIT] Ignored empty/no-speech commit.")
                     if channel.readyState == "open":
                         channel.send("NO_SPEECH")
                     voice_state.reset_to_idle("no_speech")
@@ -282,7 +373,7 @@ async def webrtc_offer(request: Request):
                 await process_voice_commit_text(final_text, channel, user_id, session_id)
                 voice_state.reset_to_idle("response_complete")
             except Exception as e:
-                print(f"❌ [ASR] Commit processing failed: {e}")
+                # print(f"❌ [ASR] Commit processing failed: {e}")
                 if channel.readyState == "open":
                     channel.send("NO_SPEECH")
                 voice_state.reset_to_idle("asr_error")
@@ -291,7 +382,7 @@ async def webrtc_offer(request: Request):
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        print(f"📶 [WEBRTC] Connection state: {pc.connectionState}")
+        # print(f"📶 [WEBRTC] Connection state: {pc.connectionState}")
         if pc.connectionState in ["failed", "closed"]:
             active_connections.discard(pc)
             channel_ref = connection_context.get("channel")
@@ -323,7 +414,7 @@ class LoginRequest(BaseModel):
 
 @router.post("/api/volco/login")
 def mobile_login(request: LoginRequest):
-    print(f"🔐 Login attempt for: {request.email}")
+    # print(f"🔐 Login attempt for: {request.email}")
     user = authenticate_mobile_user(request.email, request.password)
     if user:
         return {"success": True, "user_id": user['id'], "name": user['name']}
