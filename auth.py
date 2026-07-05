@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 from uuid import uuid4
-# UPDATED: Import the function, not the variable
+
 from db import get_db_connection
+from volco.security import hash_password, verify_password, needs_rehash
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -29,12 +30,11 @@ def register(data: RegisterReq):
             raise HTTPException(status_code=400, detail="Email already exists")
 
         user_id = str(uuid4())
+        hashed_password = hash_password(data.password)
 
-        # Insert user (storing plain text password for now as per your setup)
-        # Note: If your table column is named 'password' instead of 'password_hash', change it below.
         cur.execute(
             "INSERT INTO users (id, email, password, name) VALUES (%s, %s, %s, %s)",
-            (user_id, data.email, data.password, data.name)
+            (user_id, data.email, hashed_password, data.name)
         )
         conn.commit()
 
@@ -44,6 +44,8 @@ def register(data: RegisterReq):
             "name": data.name
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Register Error: {e}")
         # Return generic error to user, log specific error to console
@@ -60,7 +62,6 @@ def login(data: LoginReq):
 
     cur = conn.cursor()
     try:
-        # Note: If your table column is named 'password', change 'password_hash' to 'password' below
         cur.execute(
             "SELECT id, email, password, name FROM users WHERE email=%s",
             (data.email,)
@@ -68,8 +69,13 @@ def login(data: LoginReq):
         user = cur.fetchone()
 
         # user[2] is the password column (index 2 in the SELECT statement)
-        if not user or user[2] != data.password:
+        if not user or not verify_password(data.password, user[2]):
             raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # Opportunistically upgrade the hash if the scheme is outdated
+        if needs_rehash(user[2]):
+            new_hash = hash_password(data.password)
+            cur.execute("UPDATE users SET password = %s WHERE id = %s", (new_hash, user[0]))
 
         return {
             "id": user[0],
@@ -77,6 +83,8 @@ def login(data: LoginReq):
             "name": user[3]
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Login Error: {e}")
         raise HTTPException(status_code=500, detail="Login failed")

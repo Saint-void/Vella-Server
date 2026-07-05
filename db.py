@@ -1,12 +1,21 @@
 import os
+import uuid
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
+from volco.security import hash_password
+
 load_dotenv()
 
-# Use the environment variable, or fallback to your string if .env fails
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Donaldefe1.@localhost:5432/vella")
+# No hardcoded fallback — a leaked credential in source is a compromised
+# credential. Fail loudly instead so it's caught in dev, not production.
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Add it to your .env file — "
+        "no fallback credential is used for security reasons."
+    )
 
 def get_db_connection():
     """Establishes a new connection to the database."""
@@ -68,6 +77,46 @@ def init_db():
         
     except Exception as e:
         print(f"❌ Error creating tables: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+# --- USER / AUTH HELPERS ---
+
+def create_user(email: str, password: str, name: str | None = None):
+    """
+    Creates a new user with a hashed password.
+    This is the ONLY place a user row should be inserted — never insert
+    into `users` directly elsewhere, or you'll end up with a plaintext
+    password again.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return None
+
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Reject duplicate emails with a clean error rather than a raw
+        # IntegrityError bubbling up.
+        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+        if cur.fetchone():
+            print(f"❌ User creation failed: email already registered ({email})")
+            return None
+
+        user_id = str(uuid.uuid4())
+        hashed = hash_password(password)
+
+        cur.execute("""
+            INSERT INTO users (id, email, password, name)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, email, name, created_at
+        """, (user_id, email, hashed, name))
+
+        return cur.fetchone()
+
+    except Exception as e:
+        print(f"❌ Error creating user: {e}")
+        return None
     finally:
         cur.close()
         conn.close()
